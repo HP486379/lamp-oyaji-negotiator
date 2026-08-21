@@ -1,0 +1,38 @@
+{
+  "name": "spec-taro-v4",
+  "private": true,
+  "version": "4.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node server/index.js",
+    "start": "node server/index.js --production",
+    "build": "vite build",
+    "lint": "eslint . --max-warnings=0",
+    "test": "node --test tests/*.test.js",
+    "smoke:mock": "node tests/mock-flow-smoke.js",
+    "smoke:mock:salon": "node tests/mock-salon-flow.js",
+    "smoke:mock:meeting": "node tests/mock-meeting-room-flow.js",
+    "smoke:real": "node tests/real-api-smoke.js",
+    "smoke:real:child": "node tests/real-api-child-flow.js",
+    "smoke:real:e2e": "node tests/real-api-e2e.js",
+    "smoke:real:fridge": "node tests/real-api-fridge-browser-path.js"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "dotenv": "latest",
+    "express": "latest",
+    "framer-motion": "latest",
+    "lucide-react": "latest",
+    "openai": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "vite": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@eslint/js": "latest",
+    "eslint": "latest",
+    "eslint-plugin-react-hooks": "latest",
+    "eslint-plugin-react-refresh": "latest"
+  }
+}
