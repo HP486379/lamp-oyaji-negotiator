@@ -60,6 +60,7 @@ npm run dev
 | `AI_USAGE_LIMITS_ENABLED` | いいえ | AI利用制限の有効化。未設定時は`true` |
 | `AI_RATE_LIMIT_PER_MINUTE` | いいえ | 1 IPあたりの1分間のAIリクエスト上限。既定値`20` |
 | `AI_DAILY_REQUEST_LIMIT_PER_IP` | いいえ | 1 IPあたりの日次AIリクエスト上限。既定値`60` |
+| `AI_GLOBAL_DAILY_REQUEST_LIMIT` | いいえ | 全IP合計の日次AIリクエスト上限。既定値`1000` |
 | `AI_MAX_REQUESTS_PER_SESSION` | いいえ | 1セッションあたりのAIリクエスト上限。既定値`20` |
 | `AI_DAILY_SPEC_LIMIT_PER_IP` | いいえ | 1 IPあたりの日次SPECセッション上限。既定値`3` |
 
@@ -67,7 +68,7 @@ APIキーはブラウザへ渡しません。`.env`と`.env.*`はGit管理対象
 
 ## AI利用量の安全装置
 
-OpenAI APIを呼ぶ要件定義APIには、IP単位の短時間・日次制限、セッション単位の上限、IP単位の日次SPEC作成数制限、同一処理の実行中重複排除があります。制限値は環境変数を設定しなくても安全な既定値で有効です。開発・テスト時に限り、`AI_USAGE_LIMITS_ENABLED=false`で明示的に無効化できます。
+OpenAI APIを呼ぶ要件定義APIには、IP単位の短時間・日次制限、全IP合計の日次制限、セッション単位の上限、IP単位の日次SPEC作成数制限、同一処理の実行中重複排除があります。SPEC作成数は、そのsessionIdで最初の分析を開始する時点で1件として数え、同じsessionIdの再分析・SPEC修復では重複加算しません。制限値は環境変数を設定しなくても安全な既定値で有効です。開発・テスト時に限り、`AI_USAGE_LIMITS_ENABLED=false`で明示的に無効化できます。
 
 現在の利用量カウンターは単一Node.jsプロセス内のメモリ方式です。サーバー再起動時にリセットされ、複数インスタンス間では共有されません。本番を複数インスタンスで運用する場合は、同じガードの保存層をRedis等の共有ストアへ置き換える必要があります。
 
