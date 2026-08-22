@@ -974,7 +974,7 @@ const explicitFacts = (context) => context.facts.filter((fact) => fact.source ==
 const explicitSourceText = (context) => JSON.stringify({ idea: context.idea, userConfirmed: context.facts.filter((fact) => fact.source === SOURCE.USER) }).toLowerCase();
 // "ローカルユーザーデータへ反映"というAIの実装表現は、ネットワークを使わないという
 // ユーザー制約ではない。保存・処理の境界は初期入力またはユーザー確定事項だけから決める。
-const localOnly = (context) => /\blocal[ -]?(?:only|storage|device)\b|\boffline\b|端末内|ローカル(?:保存|処理|のみ)|オフライン/i.test(explicitSourceText(context));
+const localOnly = (context) => /\blocal[ -]?(?:only|storage|device)\b|\boffline\b|端末(?:内|単独(?:利用)?|のみ)|ローカル(?:端末|デバイス)?(?:内|のみ|保存|処理)|オフライン/i.test(explicitSourceText(context));
 const deviceOnlyProcessing = (context) => /photo_processing_privacy_and_storage|端末内|on[- ]device|device[- ]local/i.test(JSON.stringify(context.facts.filter((fact) => fact.source === SOURCE.USER)));
 const cloudDependent = (item) => /cloud|クラウド|external\s*ai|外部AI|remote\s*api/i.test(`${item?.key ?? ""} ${item?.value ?? ""} ${item?.title ?? ""} ${item?.description ?? ""} ${item?.reason ?? ""}`);
 
@@ -985,6 +985,32 @@ function dataBoundary(context) {
     source: explicitFacts(context).some((fact) => fact.source === SOURCE.USER) ? "user_confirmed" : "initial_input",
     instruction: "Use only local/on-device data for this MVP. This means screens reflect the same local data immediately; it does not imply cloud, server, multi-device, or network synchronization.",
   };
+}
+
+// Validators must inspect asserted MVP behavior, not words that appear only in
+// an explicit exclusion such as "除外: クラウド同期" or "通知は行わない".
+// Keeping this scope-aware projection in one place prevents every feature
+// validator from independently mistaking a negative statement for a mandate.
+const exclusionMarker = /(?:除外|対象外|実装外|将来候補|MVP(?:必須)?(?:の)?(?:範囲)?外|future\s*\/\s*optional)\s*[:：]?|(?:含めない|含まれない|含まない)|(?:不要|なし|無し|無い)(?:で(?:ある)?|とする|ものとする)?|(?:行わない|実施しない|使用しない|存在しない)|\b(?:not\s+(?:included|required|used|supported)|without)\b/i;
+
+function assertedRequirementText(value) {
+  return String(value ?? "")
+    .split(/(?<=[。.!?！？])|[\n；;]/)
+    .flatMap((sentence) => sentence.split(/(?:除外|対象外|実装外|将来候補|MVP(?:必須)?(?:の)?(?:範囲)?外|future\s*\/\s*optional)\s*[:：]/i).slice(0, 1))
+    .map((sentence) => sentence.replace(/[（(][^（）()]*?(?:不要|なし|無し|無い|行わない|実施しない|使用しない|存在しない|not\s+(?:included|required|used|supported)|without)[^（）()]*?[）)]/gi, ""))
+    .filter((sentence) => !exclusionMarker.test(sentence))
+    .join("\n");
+}
+
+function hasAffirmativeNetworkSync(value) {
+  return /(?:real[ -]?time\s+)?(?:sync|synchronization)|(?:リアルタイム)?同期/i.test(assertedRequirementText(value));
+}
+
+function normalizeLocalOnlySyncText(value) {
+  return String(value ?? "").split(/(?<=[。.!?！？])|(?=\n)/).map((sentence) => {
+    if (exclusionMarker.test(sentence)) return sentence;
+    return sentence.replace(/(?:real[ -]?time\s+)?(?:sync|synchronization)|(?:リアルタイム)?同期(?:される)?/gi, "同一ローカルデータを参照する画面へ即時反映");
+  }).join("");
 }
 
 function repairConstraintFor(issue) {
@@ -1247,7 +1273,7 @@ export function canonicalizeSpec(context, spec) {
   const normalized = { ...spec };
   for (const key of Object.keys(normalized)) normalized[key] = normalizeThresholdComparison(context, normalized[key]);
   if (localOnly(context)) {
-    for (const key of Object.keys(normalized)) normalized[key] = String(normalized[key] ?? "").replace(/(?:real[ -]?time\s+)?(?:sync|synchronization)|(?:リアルタイム)?同期(?:される)?/gi, "同一ローカルデータを参照する画面へ即時反映");
+    for (const key of Object.keys(normalized)) normalized[key] = normalizeLocalOnlySyncText(normalized[key]);
   }
   for (const key of Object.keys(normalized)) normalized[key] = generalizeUnconfirmedNumbers(context, normalized[key]);
   if (unconfirmedMinQuantityDefault(context, normalized.dataModel)) {
@@ -1379,7 +1405,7 @@ function reservationInvariantMissing(context, spec) {
 }
 
 function ungroundedProductConceptInSpec(context, spec) {
-  const mandatoryText = protectedSpecSections.map((sectionName) => String(spec?.[sectionName] ?? "")).join("\n");
+  const mandatoryText = assertedRequirementText(protectedSpecSections.map((sectionName) => String(spec?.[sectionName] ?? "")).join("\n"));
   const concepts = mandatoryText.match(/(?:完了(?:操作|状態|フラグ)|アーカイブ|削除|ステータス|承認|履歴|通知|貸出|返却|廃棄|消費|\b(?:archive|delete|status|approval|history|notification|loan|return|disposal|consume|consumption)\b)/gi) ?? [];
   if (!concepts.length) return null;
   const canonical = buildCanonicalRequirements(context);
@@ -1419,8 +1445,8 @@ export function validateSpecConsistency(context, spec) {
   if (confirmedConflicts.length) {
     issues.push({ ruleId: "confirmed_decision_conflict", ruleName: "ユーザー確定事項の矛盾", section: "User Confirmed Decisions", severity: "error", message: "ユーザー確定事項に矛盾があります。", suggestedFix: "該当する質問への回答を確認してください。", offendingDecisionIds: [...new Set(confirmedConflicts.flat().map((fact) => fact.key))], requiresUserResolution: true });
   }
-  const mvpText = [spec.mvpScope, spec.functionalRequirements, spec.acceptanceCriteria].join("\n");
-  const mandatoryText = protectedSpecSections.map((key) => String(spec[key] ?? "")).join("\n");
+  const mvpText = assertedRequirementText([spec.mvpScope, spec.functionalRequirements, spec.acceptanceCriteria].join("\n"));
+  const mandatoryText = assertedRequirementText(protectedSpecSections.map((key) => String(spec[key] ?? "")).join("\n"));
   issues.push(...reservationInvariantMissing(context, spec));
   const ungroundedConcept = ungroundedProductConceptInSpec(context, spec);
   if (ungroundedConcept) issues.push({ ruleId: "ungrounded_product_concept", ruleName: "根拠のない新しいプロダクト概念", section: "SPEC expansion", severity: "error", message: `根拠のない新しいプロダクト概念「${ungroundedConcept}」がMVP必須仕様に含まれています。`, suggestedFix: "Canonical Requirementsに根拠がない概念は削除し、必要ならProduct DecisionまたはImplementation Proposalとして扱ってください。" });
@@ -1505,7 +1531,7 @@ export function validateSpecConsistency(context, spec) {
     if (!editSections.includes(editPolicy)) issues.push({ section: "User Confirmed Decisions", severity: "error", message: "User Confirmedの編集方針がSPEC全体へ一意に反映されていません。", suggestedFix: "保存前の編集画面経由と、料理名変更は任意であることを明記してください。" });
     if (/(?:料理名(?:の)?変更|name change).{0,20}(?:必須|must|required)/i.test(editSections)) issues.push({ section: "User Confirmed Decisions", severity: "error", message: "料理名の変更可能と変更必須が混同されています。", suggestedFix: "編集画面への遷移だけを必須にし、変更操作そのものは任意としてください。" });
   }
-  if (localOnly(context) && /(?:real[ -]?time\s+)?(?:sync|synchronization)|(?:リアルタイム)?同期/i.test(finalText)) issues.push({ section: "Local data", severity: "error", message: "ローカル保存MVPにネットワーク同期を示す表現が含まれています。", suggestedFix: "同一ローカルデータを参照する画面への即時反映として記載してください。" });
+  if (localOnly(context) && hasAffirmativeNetworkSync(finalText)) issues.push({ section: "Local data", severity: "error", message: "ローカル保存MVPにネットワーク同期を示す表現が含まれています。", suggestedFix: "同一ローカルデータを参照する画面への即時反映として記載してください。" });
   if (deviceOnlyProcessing(context) && /cloud|クラウド|external\s*ai|外部AI|remote\s*api/i.test(mandatoryText)) issues.push({ section: "Photo processing privacy", severity: "error", message: "端末内処理というUser Confirmed Decisionに反するクラウド依存がMVP必須仕様に含まれています。", suggestedFix: "クラウドAI・外部API・クラウド保存を削除し、端末内処理へ整合させてください。" });
   if (/(高度|本格|充実|advanced|comprehensive)/i.test(confirmedText) && /(ゲーム化|ゲーミフィケーション|gamification)/i.test(confirmedText) && /(最小限.*(ゲーム化|ゲーミフィケーション)|バッジだけ|限定.*(バッジ|報酬))/i.test(finalText)) {
     issues.push({ section: "User Confirmed Decisions", severity: "error", message: "ユーザーが求めた高度なゲーム化がAIによって縮小されています。", suggestedFix: "詳細を質問し、ユーザー回答をそのまま仕様へ反映してください。" });

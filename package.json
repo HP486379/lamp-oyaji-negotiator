@@ -15,7 +15,8 @@
     "smoke:real": "node tests/real-api-smoke.js",
     "smoke:real:child": "node tests/real-api-child-flow.js",
     "smoke:real:e2e": "node tests/real-api-e2e.js",
-    "smoke:real:fridge": "node tests/real-api-fridge-browser-path.js"
+    "smoke:real:fridge": "node tests/real-api-fridge-browser-path.js",
+    "smoke:real:recipe": "node tests/real-api-recipe-repro.js"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
