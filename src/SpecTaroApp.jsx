@@ -83,7 +83,7 @@ export default function SpecTaroApp({ ai = new HttpRequirementsAI() }) {
   async function runAnalysis(session) {
     showThinking(session);
     try {
-      const analysis = await ai.analyzeIdea(session.idea);
+      const analysis = await ai.analyzeIdea(session.idea, session.sessionId);
       const analyzed = applyAnalysis(session, analysis);
       return runDimensions(analyzed);
     } catch (error) { fail(error, retryableOperation("analysis", session)); }
@@ -240,3 +240,4 @@ export default function SpecTaroApp({ ai = new HttpRequirementsAI() }) {
     {counts && state.phase !== "start" && <footer className="conversation-footer">入力から把握 {counts[SOURCE.INITIAL]} ・ あなたが決定 {counts[SOURCE.USER]} ・ AIが補完 {counts[SOURCE.AI]}</footer>}
   </main>;
 }
+
