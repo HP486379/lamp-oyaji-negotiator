@@ -57,8 +57,19 @@ npm run dev
 | `OPENAI_API_KEY` | はい | ExpressサーバーからOpenAI APIへ接続するためのキー |
 | `OPENAI_MODEL` | いいえ | 使用モデル。未設定時はコード上の既定モデルを使用 |
 | `OPENAI_REQUEST_TIMEOUT_MS` | いいえ | フェーズ別設定がないOpenAIリクエストのタイムアウト |
+| `AI_USAGE_LIMITS_ENABLED` | いいえ | AI利用制限の有効化。未設定時は`true` |
+| `AI_RATE_LIMIT_PER_MINUTE` | いいえ | 1 IPあたりの1分間のAIリクエスト上限。既定値`20` |
+| `AI_DAILY_REQUEST_LIMIT_PER_IP` | いいえ | 1 IPあたりの日次AIリクエスト上限。既定値`60` |
+| `AI_MAX_REQUESTS_PER_SESSION` | いいえ | 1セッションあたりのAIリクエスト上限。既定値`20` |
+| `AI_DAILY_SPEC_LIMIT_PER_IP` | いいえ | 1 IPあたりの日次SPECセッション上限。既定値`3` |
 
 APIキーはブラウザへ渡しません。`.env`と`.env.*`はGit管理対象外で、公開可能な変数名だけを`.env.example`に記載しています。
+
+## AI利用量の安全装置
+
+OpenAI APIを呼ぶ要件定義APIには、IP単位の短時間・日次制限、セッション単位の上限、IP単位の日次SPEC作成数制限、同一処理の実行中重複排除があります。制限値は環境変数を設定しなくても安全な既定値で有効です。開発・テスト時に限り、`AI_USAGE_LIMITS_ENABLED=false`で明示的に無効化できます。
+
+現在の利用量カウンターは単一Node.jsプロセス内のメモリ方式です。サーバー再起動時にリセットされ、複数インスタンス間では共有されません。本番を複数インスタンスで運用する場合は、同じガードの保存層をRedis等の共有ストアへ置き換える必要があります。
 
 ## コマンド
 
@@ -70,3 +81,4 @@ npm run build
 ```
 
 実API用のスモークテストは有効な`OPENAI_API_KEY`を設定したローカル環境で実行してください。
+
