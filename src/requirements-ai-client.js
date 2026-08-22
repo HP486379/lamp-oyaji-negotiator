@@ -22,10 +22,11 @@ async function request(path, body) {
 }
 export class HttpRequirementsAI {
   startProject(idea) { return request("start", { idea }); }
-  analyzeIdea(idea) { return request("analyze", { idea }); }
+  analyzeIdea(idea, sessionId) { return request("analyze", { idea, sessionId }); }
   generateDimensions(context) { return request("dimensions", { context }); }
   inferMvp(context) { return request("infer-mvp", { context }); }
   auditCriticalDecisionCoverage(context) { return request("coverage-audit", { context }); }
   generateSpec(context) { return request("generate-spec", { context }); }
   validateSpec(context, spec) { return request("validate", { context, spec }); }
 }
+
