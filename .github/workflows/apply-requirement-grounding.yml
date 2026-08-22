@@ -1,0 +1,30 @@
+name: Apply requirement grounding patch
+
+on:
+  push:
+    branches: [fix/requirement-grounding]
+    paths: [.github/workflows/apply-requirement-grounding.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/requirement-grounding
+      - name: Download Copilot patch
+        run: |
+          curl -fL 'https://jp-prod.asyncgw.teams.microsoft.com/v1/objects/0-ea-d5-11d5945d05d51ea0b9c122eff8231ce6/views/original/6.patch' -o /tmp/requirement-grounding.patch
+          test -s /tmp/requirement-grounding.patch
+      - name: Apply patch
+        run: git apply --check /tmp/requirement-grounding.patch && git apply /tmp/requirement-grounding.patch
+      - name: Commit changes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add requirements-core.js server/ai.js src/SpecTaroApp.jsx tests/requirement-grounding-regression.test.js
+          git commit -m 'Add requirement grounding gate'
+          git push origin HEAD:fix/requirement-grounding
