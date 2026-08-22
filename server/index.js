@@ -7,15 +7,17 @@ import { diagnostic } from "./diagnostics.js";
 import { apiError, requirementsAI } from "./ai.js";
 import { AIUsageGuard, AIUsageLimitError, usageGuardConfig } from "./ai-usage-guard.js";
 import { ParkingError, ParkingStore } from "./parking-store.js";
+import { createJsonBodyParser, jsonBodyLimitErrorHandler, RequestInputError, requestSafetyConfig, validateRequirementsInput } from "./request-safety.js";
 
 const app = express();
 const port = Number(process.env.PORT || 5173);
 const trustProxy = process.env.TRUST_PROXY?.trim() || "loopback, linklocal, uniquelocal";
 app.set("trust proxy", trustProxy);
 const usageConfig = usageGuardConfig();
+const safetyConfig = requestSafetyConfig();
 const aiUsageGuard = new AIUsageGuard({ config: usageConfig, diagnostic });
-diagnostic("server_boot", { runtime_revision: "completion-gate-provenance-v3", port, trust_proxy: trustProxy, ai_usage_limits_enabled: usageConfig.enabled });
-app.use(express.json({ limit: "1mb" }));
+diagnostic("server_boot", { runtime_revision: "completion-gate-provenance-v3", port, trust_proxy: trustProxy, ai_usage_limits_enabled: usageConfig.enabled, max_idea_chars: safetyConfig.maxIdeaChars, json_body_limit: safetyConfig.jsonBodyLimit });
+app.use(createJsonBodyParser(safetyConfig.jsonBodyLimit));
 const parkingStore = new ParkingStore();
 const parkingRoute = (handler) => async (req, res) => {
   try { res.json(await handler(req)); }
@@ -32,12 +34,16 @@ app.post("/api/parking/reservations", parkingRoute((req) => parkingStore.reserve
 const requirementsRoute = (operation, handler) => async (req, res) => {
   const sessionId = req.body?.sessionId ?? req.body?.context?.sessionId ?? "anonymous";
   try {
+    validateRequirementsInput(operation, req.body, safetyConfig);
     const result = await aiUsageGuard.run({ ip: req.ip, sessionId, operation, input: req.body }, (requestContext) => handler(req, requestContext));
     res.json(result);
   }
   catch (error) {
     if (error instanceof AIUsageLimitError) {
       return res.status(429).json({ error: { message: error.message, code: error.code } });
+    }
+    if (error instanceof RequestInputError) {
+      return res.status(error.status).json({ error: { message: error.message, code: error.code } });
     }
     const result = apiError(error);
     res.status(result.status).json({ error: { message: result.message } });
@@ -82,6 +88,7 @@ app.post("/api/requirements/coverage-audit", requirementsRoute("coverage-audit",
 }));
 app.post("/api/requirements/generate-spec", requirementsRoute("generate-spec", (req, requestContext) => requirementsAI.generateSpec(req.body.context, { requestContext })));
 app.post("/api/requirements/validate", requirementsRoute("validate", (req, requestContext) => requirementsAI.validateSpec(req.body.context, req.body.spec, { requestContext })));
+app.use(jsonBodyLimitErrorHandler);
 if (process.env.NODE_ENV === "production" || process.argv.includes("--production")) {
   const here = path.dirname(fileURLToPath(import.meta.url));
   app.use(express.static(path.join(here, "..", "dist")));
@@ -96,4 +103,5 @@ server.on("error", (error) => {
   console.error(`[requirements] サーバーを起動できませんでした (port=${port}, code=${error.code || "unknown"})`);
   process.exitCode = 1;
 });
+
 
