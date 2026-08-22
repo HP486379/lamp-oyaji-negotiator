@@ -4,6 +4,7 @@ import { clearInterval, setInterval } from "node:timers";
 const DEFAULTS = Object.freeze({
   rateLimitPerMinute: 20,
   dailyRequestLimitPerIp: 60,
+  globalDailyRequestLimit: 1000,
   maxRequestsPerSession: 20,
   dailySpecLimitPerIp: 3,
   cleanupIntervalMs: 10 * 60 * 1000,
@@ -21,6 +22,7 @@ export function usageGuardConfig(env = process.env) {
     enabled: String(env.AI_USAGE_LIMITS_ENABLED ?? "true").toLowerCase() !== "false",
     rateLimitPerMinute: positiveInteger(env.AI_RATE_LIMIT_PER_MINUTE, DEFAULTS.rateLimitPerMinute),
     dailyRequestLimitPerIp: positiveInteger(env.AI_DAILY_REQUEST_LIMIT_PER_IP, DEFAULTS.dailyRequestLimitPerIp),
+    globalDailyRequestLimit: positiveInteger(env.AI_GLOBAL_DAILY_REQUEST_LIMIT, DEFAULTS.globalDailyRequestLimit),
     maxRequestsPerSession: positiveInteger(env.AI_MAX_REQUESTS_PER_SESSION, DEFAULTS.maxRequestsPerSession),
     dailySpecLimitPerIp: positiveInteger(env.AI_DAILY_SPEC_LIMIT_PER_IP, DEFAULTS.dailySpecLimitPerIp),
     cleanupIntervalMs: positiveInteger(env.AI_USAGE_CLEANUP_INTERVAL_MS, DEFAULTS.cleanupIntervalMs),
@@ -79,6 +81,7 @@ export class AIUsageGuard {
     this.diagnostic = diagnostic;
     this.minuteByIp = new Map();
     this.dailyByIp = new Map();
+    this.globalDaily = new Map();
     this.sessionByIpAndId = new Map();
     this.specSessionsByIp = new Map();
     this.inFlight = new Map();
@@ -99,6 +102,7 @@ export class AIUsageGuard {
     };
     removeOld(this.minuteByIp);
     removeOld(this.dailyByIp);
+    removeOld(this.globalDaily);
     removeOld(this.sessionByIpAndId);
     removeOld(this.specSessionsByIp);
     for (const [key, value] of this.inFlight) if ((value.startedAt ?? 0) < now - this.config.cleanupIntervalMs) this.inFlight.delete(key);
@@ -108,6 +112,7 @@ export class AIUsageGuard {
     return {
       minuteEntries: this.minuteByIp.size,
       dailyEntries: this.dailyByIp.size,
+      globalDailyEntries: this.globalDaily.size,
       sessionEntries: this.sessionByIpAndId.size,
       specEntries: this.specSessionsByIp.size,
       inFlightEntries: this.inFlight.size,
@@ -127,10 +132,11 @@ export class AIUsageGuard {
     const sessionKey = `${metadata.ip}\u0000${metadata.sessionId}`;
     const minuteState = this.minuteByIp.get(metadata.ip);
     const dailyState = this.dailyByIp.get(metadata.ip);
+    const globalDailyState = this.globalDaily.get("global");
     const sessionState = this.sessionByIpAndId.get(sessionKey);
     const specState = this.specSessionsByIp.get(metadata.ip);
 
-    if (metadata.operation === "generate-spec") {
+    if (metadata.operation === "analyze") {
       const sessions = specState?.day === day ? specState.sessions : new Set();
       if (!sessions.has(metadata.sessionId) && sessions.size >= this.config.dailySpecLimitPerIp) {
         this.#throwLimit("AI_DAILY_SPEC_LIMIT", "本日のSPEC作成上限に達しました。また明日お試しください。", metadata);
@@ -142,14 +148,18 @@ export class AIUsageGuard {
     if (dailyState?.day === day && dailyState.count >= this.config.dailyRequestLimitPerIp) {
       this.#throwLimit("AI_DAILY_REQUEST_LIMIT", "本日のAI利用上限に達しました。また明日お試しください。", metadata);
     }
+    if (globalDailyState?.day === day && globalDailyState.count >= this.config.globalDailyRequestLimit) {
+      this.#throwLimit("AI_GLOBAL_DAILY_REQUEST_LIMIT", "本日のAIサービス全体の利用上限に達しました。また明日お試しください。", metadata);
+    }
     if (sessionState?.count >= this.config.maxRequestsPerSession) {
       this.#throwLimit("AI_SESSION_REQUEST_LIMIT", "この相談で利用できるAI処理の上限に達しました。新しい相談としてやり直してください。", metadata);
     }
 
     boundedSet(this.minuteByIp, metadata.ip, { window: minute, count: minuteState?.window === minute ? minuteState.count + 1 : 1, lastSeen: now }, this.config.maxEntries);
     boundedSet(this.dailyByIp, metadata.ip, { day, count: dailyState?.day === day ? dailyState.count + 1 : 1, lastSeen: now }, this.config.maxEntries);
+    boundedSet(this.globalDaily, "global", { day, count: globalDailyState?.day === day ? globalDailyState.count + 1 : 1, lastSeen: now }, this.config.maxEntries);
     boundedSet(this.sessionByIpAndId, sessionKey, { count: (sessionState?.count ?? 0) + 1, lastSeen: now }, this.config.maxEntries);
-    if (metadata.operation === "generate-spec") {
+    if (metadata.operation === "analyze") {
       const sessions = specState?.day === day ? new Set(specState.sessions) : new Set();
       sessions.add(metadata.sessionId);
       boundedSet(this.specSessionsByIp, metadata.ip, { day, sessions, lastSeen: now }, this.config.maxEntries);
