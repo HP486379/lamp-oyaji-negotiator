@@ -1,3 +1,4 @@
+
 /**
  * Domain layer for 仕様太郎 v4.1.
  * It never contains a genre catalogue; only the provider may derive project
@@ -21,6 +22,7 @@ export function createProjectContext(idea) {
     inferredDecisions: {}, implementationProposals: [], futureOptional: [], history: [], coreInvariants: [],
     confirmedFinalDecisions: [], finalConfirmationHistory: [],
     generatedSpec: null, validation: null, status: "analyzing",
+    groundedDomainRegistry: [], rejectedDecisionCandidates: [],
   };
 }
 
@@ -30,6 +32,7 @@ export function createProjectContext(idea) {
 export function enableCriticalDecisionCoverageAudit(context) {
   return { ...context, criticalDecisionCoverageAuditRequired: true, criticalDecisionCoverageAudit: null };
 }
+export function enableRequirementGrounding(context) { return { ...context, requirementGroundingRequired: true }; }
 
 export function criticalDecisionCoverageFingerprint(context) {
   return JSON.stringify({
@@ -63,9 +66,10 @@ export function applyAnalysis(context, analysis) {
 
 export function setDimensions(context, dimensions) {
   const withInvariants = { ...context, coreInvariants: deriveCoreInvariants(context) };
+  const admitted = admitGroundedCandidates(withInvariants, dimensions, "initial");
   const next = {
-    ...withInvariants,
-    dimensions: dimensions.map((dimension) => {
+    ...admitted.context,
+    dimensions: admitted.accepted.map((dimension) => {
       const question = dimension.question ? { ...dimension.question, decisionDomain: dimensionDecisionDomain(dimension) } : null;
       return {
         ...dimension,
@@ -180,6 +184,38 @@ const decisionDomainNoise = new Set(["q", "question", "decision", "choice", "con
 function decisionDomainTokens(value) {
   return canonicalDecisionDomain(value, value).split(/[^a-z0-9\u3040-\u30ff\u3400-\u9fff]+/i).filter((token) => token && !decisionDomainNoise.has(token));
 }
+
+function itemGrounding(item) { return item?.grounding ?? null; }
+function groundedDomains(context) { return (context?.groundedDomainRegistry ?? []).map((entry) => canonicalDecisionDomain(entry.decisionDomain, entry.decisionDomain)); }
+function exactInitialSpanExists(context, grounding) { const span=String(grounding?.sourceInitialInputSpan ?? "").trim(); return span.length > 0 && String(context?.idea ?? "").includes(span); }
+function userAnswerExists(context, answerId) { return Boolean(answerId) && (context?.facts ?? []).some((fact) => fact.source === SOURCE.USER && fact.key === answerId); }
+function sourceFactExists(context, sourceRef) { return sourceRef === "idea" || (context?.facts ?? []).some((fact) => fact.key === sourceRef && (fact.source === SOURCE.INITIAL || fact.source === SOURCE.USER)); }
+export function evaluateRequirementGrounding(context, item, { phase = "initial" } = {}) {
+  if (context?.requirementGroundingRequired !== true) return { accepted: true, legacy: true };
+  const grounding = itemGrounding(item); const domain=canonicalDecisionDomain(item?.decisionDomain ?? item?.question?.decisionDomain ?? item?.id, item?.id ?? "");
+  if (!grounding || grounding.grounded !== true || !domain || !sourceFactExists(context, grounding.sourceRef)) return { accepted:false, reason:"missing_or_invalid_source", domain };
+  if (phase === "initial") {
+    if (grounding.sourceType === SOURCE.INITIAL && grounding.sourceRef === "idea" && exactInitialSpanExists(context, grounding)) return { accepted:true, domain };
+    if (grounding.sourceType === SOURCE.USER && userAnswerExists(context, grounding.sourceRef)) return { accepted:true, domain };
+    return { accepted:false, reason:"invalid_initial_evidence", domain };
+  }
+  const parent=canonicalDecisionDomain(grounding.parentDomain, grounding.parentDomain ?? ""); const answerId=grounding.answerId;
+  const parentExists=Boolean(parent) && groundedDomains(context).some((existing)=>semanticDecisionDomainEquivalent(existing,parent));
+  if (grounding.sourceType !== "derived_from_answer" || !userAnswerExists(context, answerId) || grounding.sourceRef !== answerId) return { accepted:false, reason:"invalid_trigger_answer", domain };
+  if (!parentExists) return { accepted:false, reason:"invalid_parent_domain", domain };
+  if (grounding.directCausalRelation !== true || String(grounding.causalExplanation ?? "").trim().length < 8) return { accepted:false, reason:"missing_direct_causality", domain };
+  if (grounding.directlyAffectsPrimaryFlow !== true && grounding.directlyAffectsRequiredData !== true) return { accepted:false, reason:"no_direct_mvp_impact", domain };
+  return { accepted:true, domain };
+}
+function admitGroundedCandidates(context, candidates, phase) {
+  const registry=[...(context?.groundedDomainRegistry ?? [])], rejected=[...(context?.rejectedDecisionCandidates ?? [])], accepted=[];
+  for (const candidate of candidates ?? []) { const result=evaluateRequirementGrounding({...context,groundedDomainRegistry:registry},candidate,{phase});
+    if (!result.accepted) { rejected.push({decisionDomain:result.domain ?? null,reason:result.reason}); continue; }
+    accepted.push(candidate); if (!registry.some((entry)=>semanticDecisionDomainEquivalent(entry.decisionDomain,result.domain))) registry.push({decisionDomain:result.domain,grounding:candidate.grounding ? clone(candidate.grounding) : null});
+  }
+  return {context:{...context,groundedDomainRegistry:registry,rejectedDecisionCandidates:rejected},accepted};
+}
+function domainHasGrounding(context, domain) { return groundedDomains(context).some((existing)=>semanticDecisionDomainEquivalent(existing,domain)); }
 
 export function semanticDecisionDomainEquivalent(left, right) {
   const a = canonicalDecisionDomain(left, left); const b = canonicalDecisionDomain(right, right);
@@ -413,6 +449,7 @@ function primaryFlowCompleteness(context) {
 function analysisCriticalProductDecisions(context) {
   const initial = (context?.analysis?.criticalProductDecisions ?? [])
     .filter((item) => item?.decisionDomain)
+    .filter((item) => evaluateRequirementGrounding(context, item, { phase: "initial" }).accepted)
     .filter((item) => criticalDecisionRequiresQuestion(item, context))
     .map((item) => ({
       decisionDomain: canonicalDecisionDomain(item.decisionDomain, item.decisionDomain),
@@ -423,6 +460,7 @@ function analysisCriticalProductDecisions(context) {
     .filter((item) => !invariantDomains(context).has(item.decisionDomain));
   const reevaluated = (context?.reassessedCriticalProductDecisions ?? [])
     .filter((item) => item?.decisionDomain)
+    .filter((item) => domainHasGrounding(context, item.decisionDomain))
     .filter((item) => criticalDecisionRequiresQuestion(item, context))
     .map((item) => ({
       decisionDomain: canonicalDecisionDomain(item.decisionDomain, item.decisionDomain),
@@ -804,8 +842,14 @@ function mayBecomeMandatoryInferred(context, item) {
 /** Records AI data in exactly one of the three non-user categories. */
 export function recordInference(context, inference) {
   const withInvariants = { ...context, coreInvariants: deriveCoreInvariants(context) };
-  const grouped = normaliseInference(inference);
-  const userKeys = new Set(withInvariants.facts.filter((fact) => fact.source === SOURCE.USER).map((fact) => fact.key));
+  let grouped = normaliseInference(inference);
+  const decisionCandidates = [...(grouped.criticalProductDecisions ?? []), ...(grouped.clarificationQuestions ?? []), ...(grouped.stateTransitionGaps ?? []).filter((gap) => gap.requiresProductDecision)];
+  const admitted = admitGroundedCandidates(withInvariants, decisionCandidates, "after_answer");
+  const admittedDomains = admitted.accepted.map((item) => canonicalDecisionDomain(item?.decisionDomain ?? item?.question?.decisionDomain ?? item?.id, item?.id ?? ""));
+  const isAdmitted = (item) => admittedDomains.some((domain) => semanticDecisionDomainEquivalent(domain, canonicalDecisionDomain(item?.decisionDomain ?? item?.question?.decisionDomain ?? item?.id, item?.id ?? "")));
+  grouped = { ...grouped, criticalProductDecisions: (grouped.criticalProductDecisions ?? []).filter(isAdmitted), clarificationQuestions: (grouped.clarificationQuestions ?? []).filter(isAdmitted), stateTransitionGaps: (grouped.stateTransitionGaps ?? []).filter((gap) => !gap.requiresProductDecision || isAdmitted(gap)) };
+  const groundedContext = admitted.context;
+  const userKeys = new Set(groundedContext.facts.filter((fact) => fact.source === SOURCE.USER).map((fact) => fact.key));
   const requirementMetadata = new Map((grouped.requirements ?? []).map((item) => [item.key, item]));
   const requirementDomains = new Map((grouped.requirements ?? []).map((item) => [item.key, item.decisionDomain ?? null]));
   let requirements = uniqueByKey(grouped.requirements)
@@ -832,7 +876,7 @@ export function recordInference(context, inference) {
     const decision = requirements.find((item) => item.key === dimension.id);
     return !decision || dimension.known || dimension.userJudgmentRequired !== false ? dimension : { ...dimension, known: true, value: decision.value };
   });
-  const facts = uniqueByKey([...withInvariants.facts, ...requirements.map((item) => ({ ...item, source: SOURCE.AI }))]);
+  const facts = uniqueByKey([...groundedContext.facts, ...requirements.map((item) => ({ ...item, source: SOURCE.AI }))]);
   const inferredProposals = uncertainRequirements.map((item) => ({ key: item.key, title: item.key, description: item.value, recommended: false, reason: item.reason, alternatives: [] }));
   const proposals = uniqueByKey([...inferredProposals, ...grouped.implementationProposals])
     .filter((item) => item?.key && !userKeys.has(item.key) && !inferredKeys.has(item.key));
@@ -867,7 +911,7 @@ export function recordInference(context, inference) {
     .filter((gap) => !settledDomains.has(canonicalDecisionDomain(gap.question, gap.id)) && !invariantDomains(withInvariants).has(canonicalDecisionDomain(gap.question, gap.id)) && questionPassesDecisionGate(gap.question, nextQuestionDepth))
     .map((gap) => ({ id: gap.id, label: gap.trigger || gap.id, importance: "high", userJudgmentRequired: true, known: false, value: null, questionDepth: nextQuestionDepth, question: sanitizeQuestionOptions(gap.question, withInvariants) }));
   const next = {
-    ...withInvariants, dimensions, facts,
+    ...groundedContext, dimensions, facts,
     inferredDecisions: Object.fromEntries(requirements.map((item) => [item.key, clone(item)])),
     inferredDecisionDomains: [...new Set([...(withInvariants.inferredDecisionDomains ?? []), ...requirements.map((item) => canonicalDecisionDomain(item.decisionDomain, item.key)).filter(Boolean)])],
     implementationProposals: proposals, futureOptional, stateTransitionGaps,
@@ -889,17 +933,22 @@ export function recordInference(context, inference) {
 /** Applies one independent coverage audit. Missing product decisions flow
  * through the same inference/question guards as ordinary reassessment. */
 export function applyCriticalDecisionCoverageAudit(context, audit) {
-  const returnedCriticalProductDecisions = audit?.criticalProductDecisions ?? [];
+  const auditCandidates = [...(audit?.criticalProductDecisions ?? []), ...(audit?.clarificationQuestions ?? []), ...(audit?.stateTransitionGaps ?? []).filter((gap) => gap.requiresProductDecision)];
+  const auditAdmission = admitGroundedCandidates(context, auditCandidates, "after_answer");
+  const auditDomains = auditAdmission.accepted.map((item) => canonicalDecisionDomain(item?.decisionDomain ?? item?.question?.decisionDomain ?? item?.id, item?.id ?? ""));
+  const auditAdmitted = (item) => auditDomains.some((domain) => semanticDecisionDomainEquivalent(domain, canonicalDecisionDomain(item?.decisionDomain ?? item?.question?.decisionDomain ?? item?.id, item?.id ?? "")));
+  context = auditAdmission.context;
+  const returnedCriticalProductDecisions = (audit?.criticalProductDecisions ?? []).filter(auditAdmitted);
   const rejectedNonCriticalDecisions = returnedCriticalProductDecisions.filter((item) => !criticalDecisionRequiresQuestion(item, context));
   const criticalProductDecisions = returnedCriticalProductDecisions
     .filter((item) => criticalDecisionRequiresQuestion(item, context))
     .filter((item) => !isDecisionDomainSettled(context, item.decisionDomain));
   const criticalDomains = criticalProductDecisions.map((item) => item.decisionDomain);
-  const clarificationQuestions = (audit?.clarificationQuestions ?? []).filter((item) => {
+  const clarificationQuestions = (audit?.clarificationQuestions ?? []).filter(auditAdmitted).filter((item) => {
     const domain = item?.question?.decisionDomain ?? item?.id;
     return !isDecisionDomainSettled(context, domain) && criticalDomains.some((critical) => semanticDecisionDomainEquivalent(critical, domain));
   });
-  const stateTransitionGaps = (audit?.stateTransitionGaps ?? []).filter((gap) => {
+  const stateTransitionGaps = (audit?.stateTransitionGaps ?? []).filter((gap) => !gap?.requiresProductDecision || auditAdmitted(gap)).filter((gap) => {
     const domain = gap?.question?.decisionDomain ?? gap?.id;
     return !gap?.requiresProductDecision || !isDecisionDomainSettled(context, domain);
   });
