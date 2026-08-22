@@ -11,6 +11,7 @@ function createGuard(overrides = {}) {
       enabled: true,
       rateLimitPerMinute: 100,
       dailyRequestLimitPerIp: 100,
+      globalDailyRequestLimit: 100,
       maxRequestsPerSession: 100,
       dailySpecLimitPerIp: 100,
       cleanupIntervalMs: 60_000,
@@ -33,6 +34,7 @@ test("safe defaults are enabled and development can explicitly disable limits", 
     enabled: true,
     rateLimitPerMinute: 20,
     dailyRequestLimitPerIp: 60,
+    globalDailyRequestLimit: 1000,
     maxRequestsPerSession: 20,
     dailySpecLimitPerIp: 3,
     cleanupIntervalMs: 600_000,
@@ -45,7 +47,7 @@ test("safe defaults are enabled and development can explicitly disable limits", 
 test("ordinary use remains below every limit", async () => {
   const { guard } = createGuard();
   assert.deepEqual(await invoke(guard), { ok: true });
-  assert.deepEqual(guard.snapshot(), { minuteEntries: 1, dailyEntries: 1, sessionEntries: 1, specEntries: 0, inFlightEntries: 0 });
+  assert.deepEqual(guard.snapshot(), { minuteEntries: 1, dailyEntries: 1, globalDailyEntries: 1, sessionEntries: 1, specEntries: 1, inFlightEntries: 0 });
 });
 
 test("minute limit rejects before another handler starts", async () => {
@@ -74,17 +76,34 @@ test("session limit stops a runaway session", async () => {
   assert.throws(() => invoke(guard, { input: { n: 3 } }), (error) => error.code === "AI_SESSION_REQUEST_LIMIT");
 });
 
-test("fourth distinct SPEC session per IP is rejected", async () => {
+test("fourth distinct SPEC session is rejected before analyze calls OpenAI", async () => {
   const { guard } = createGuard({ dailySpecLimitPerIp: 3 });
-  for (const sessionId of ["spec-1", "spec-2", "spec-3"]) await invoke(guard, { sessionId, operation: "generate-spec", input: { sessionId } });
-  assert.throws(() => invoke(guard, { sessionId: "spec-4", operation: "generate-spec", input: { sessionId: "spec-4" } }), (error) => error.code === "AI_DAILY_SPEC_LIMIT");
+  let calls = 0;
+  const handler = async () => { calls += 1; };
+  for (const sessionId of ["spec-1", "spec-2", "spec-3"]) await invoke(guard, { sessionId, operation: "analyze", input: { sessionId } }, handler);
+  assert.throws(() => invoke(guard, { sessionId: "spec-4", operation: "analyze", input: { sessionId: "spec-4" } }, handler), (error) => error.code === "AI_DAILY_SPEC_LIMIT");
+  assert.equal(calls, 3);
 });
 
-test("regenerating the same SPEC session is counted only once", async () => {
+test("retrying analyze for the same session is counted as one SPEC session", async () => {
   const { guard } = createGuard({ dailySpecLimitPerIp: 1 });
+  await invoke(guard, { sessionId: "spec-1", operation: "analyze", input: { retry: 0 } });
+  await invoke(guard, { sessionId: "spec-1", operation: "analyze", input: { retry: 1 } });
   await invoke(guard, { sessionId: "spec-1", operation: "generate-spec", input: { repair: 0 } });
-  await invoke(guard, { sessionId: "spec-1", operation: "generate-spec", input: { repair: 1 } });
-  assert.throws(() => invoke(guard, { sessionId: "spec-2", operation: "generate-spec", input: { repair: 0 } }), (error) => error.code === "AI_DAILY_SPEC_LIMIT");
+  assert.throws(() => invoke(guard, { sessionId: "spec-2", operation: "analyze", input: { retry: 0 } }), (error) => error.code === "AI_DAILY_SPEC_LIMIT");
+});
+
+test("global daily limit aggregates all IPs and resets on a new UTC day", async () => {
+  const { guard, advance } = createGuard({ globalDailyRequestLimit: 2 });
+  let calls = 0;
+  const handler = async () => { calls += 1; };
+  await invoke(guard, { ip: "203.0.113.1", operation: "dimensions", input: { n: 1 } }, handler);
+  await invoke(guard, { ip: "203.0.113.2", operation: "infer-mvp", input: { n: 2 } }, handler);
+  assert.throws(() => invoke(guard, { ip: "203.0.113.3", operation: "validate", input: { n: 3 } }, handler), (error) => error.status === 429 && error.code === "AI_GLOBAL_DAILY_REQUEST_LIMIT" && /AIサービス全体/.test(error.message));
+  assert.equal(calls, 2);
+  advance(24 * 60 * 60 * 1000);
+  await invoke(guard, { ip: "203.0.113.3", operation: "validate", input: { n: 4 } }, handler);
+  assert.equal(calls, 3);
 });
 
 test("identical in-flight requests share one OpenAI operation", async () => {
@@ -104,10 +123,10 @@ test("identical in-flight requests share one OpenAI operation", async () => {
 
 test("cleanup removes expired map entries", async () => {
   const { guard, advance } = createGuard({ retentionMs: 1_000 });
-  await invoke(guard, { operation: "generate-spec" });
+  await invoke(guard, { operation: "analyze" });
   advance(1_001);
   guard.cleanup();
-  assert.deepEqual(guard.snapshot(), { minuteEntries: 0, dailyEntries: 0, sessionEntries: 0, specEntries: 0, inFlightEntries: 0 });
+  assert.deepEqual(guard.snapshot(), { minuteEntries: 0, dailyEntries: 0, globalDailyEntries: 0, sessionEntries: 0, specEntries: 0, inFlightEntries: 0 });
 });
 
 test("in-flight request tracking is bounded", async () => {
