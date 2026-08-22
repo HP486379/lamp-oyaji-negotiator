@@ -65,12 +65,15 @@ export function setDimensions(context, dimensions) {
   const withInvariants = { ...context, coreInvariants: deriveCoreInvariants(context) };
   const next = {
     ...withInvariants,
-    dimensions: dimensions.map((dimension) => ({
-      ...dimension,
-      known: !!dimension.known,
-      questionDepth: dimension.questionDepth ?? 0,
-      question: sanitizeQuestionOptions(dimension.question, withInvariants),
-    })),
+    dimensions: dimensions.map((dimension) => {
+      const question = dimension.question ? { ...dimension.question, decisionDomain: dimensionDecisionDomain(dimension) } : null;
+      return {
+        ...dimension,
+        known: !!dimension.known,
+        questionDepth: dimension.questionDepth ?? 0,
+        question: sanitizeQuestionOptions(question, withInvariants),
+      };
+    }),
     status: "questioning",
   };
   return { ...next, completionGate: completionGate(next) };
@@ -165,6 +168,14 @@ function canonicalDecisionDomain(question, fallback = "") {
   return raw || fallback;
 }
 
+const genericDecisionDomainLabels = new Set(["product", "ux", "implementation", "edge_case", "none"]);
+function dimensionDecisionDomain(dimension) {
+  const declared = canonicalDecisionDomain(dimension?.question, dimension?.id ?? "");
+  return !declared || genericDecisionDomainLabels.has(declared)
+    ? canonicalDecisionDomain(dimension?.id, dimension?.id ?? "")
+    : declared;
+}
+
 const decisionDomainNoise = new Set(["q", "question", "decision", "choice", "confirm"]);
 function decisionDomainTokens(value) {
   return canonicalDecisionDomain(value, value).split(/[^a-z0-9\u3040-\u30ff\u3400-\u9fff]+/i).filter((token) => token && !decisionDomainNoise.has(token));
@@ -245,7 +256,7 @@ function userExplicitlyRequestsTechnicalLanguage(context) {
 
 /** A user-facing question must describe an experience, never storage mechanics. */
 export function questionPresentationGuard(question, context) {
-  const declaredUnsafe = question?.presentation && (question.presentation.isProductLanguage === false || (question.presentation.technicalTermsFound ?? []).length > 0);
+  const declaredUnsafe = (question?.presentation?.technicalTermsFound ?? []).some((term) => technicalPresentationPattern.test(String(term)));
   const detectedTerms = technicalPresentationPattern.test(questionText(question));
   const allowedByUser = userExplicitlyRequestsTechnicalLanguage(context);
   return { safe: allowedByUser || (!declaredUnsafe && !detectedTerms), technicalLanguageDetected: !allowedByUser && (declaredUnsafe || detectedTerms) };
@@ -273,7 +284,7 @@ function productDecisionDimensions(context) {
     const domain = canonicalDecisionDomain(dimension.question, dimension.id);
     return dimension.userJudgmentRequired !== false && dimension.question
       && !invariantDomains(context).has(domain)
-      && questionPassesDecisionGate(dimension.question, dimension.questionDepth ?? 0);
+      && questionIsAllowed(dimension.question, dimension.questionDepth ?? 0, context);
   });
 }
 
@@ -299,6 +310,17 @@ function answeredPrimaryFlowDomainSignal(context) {
 
 function actorDomainSignal(domain) { return /(?:actor|audience|user|role|permission|usage|scope|利用者|対象者|利用範囲)/i.test(String(domain ?? "")); }
 function managedObjectDomainSignal(domain) { return /(?:object|target|item|asset|inventory|record|managed|対象|管理物|備品)/i.test(String(domain ?? "")); }
+function outputSelectionDomainSignal(domain) { return /(?:match|eligib|selection[_ -]?rule|recommendation[_ -]?(?:rule|basis)|strictness|qualification|candidate[_ -]?rule|照合|一致条件|選定基準|提案基準|判定基準)/i.test(String(domain ?? "")); }
+const outputSelectionFlowPattern = /(?:recommend|suggest|match|rank|filter|candidate|eligible|提案|推薦|おすすめ|候補|適合|マッチ|絞り込)/i;
+const explicitOutputSelectionRulePattern = /(?:complete|exact|partial|substitut|all required|at least|threshold|score|完全一致|部分一致|代替|全(?:て|部|必要).{0,18}(?:満た|揃)|不足.{0,12}許容|閾値|スコア.{0,12}(?:以上|上位))/i;
+
+function coreOutputEligibilityNeedsDecision(context, domains) {
+  if (!context?.criticalDecisionCoverageAuditRequired) return false;
+  const flowText = [context?.idea, context?.analysis?.purpose, context?.analysis?.primaryAction, context?.analysis?.successCondition].filter(Boolean).join(" ");
+  if (!outputSelectionFlowPattern.test(flowText)) return false;
+  if (explicitOutputSelectionRulePattern.test(explicitProductSourceText(context))) return false;
+  return !domains.some(outputSelectionDomainSignal);
+}
 
 /**
  * Provider v4.2 decisions carry the three answers from the Question Necessity
@@ -306,9 +328,39 @@ function managedObjectDomainSignal(domain) { return /(?:object|target|item|asset
  * user-owned behavior until the next AI reassessment supplies an explicit
  * classification.
  */
-export function criticalDecisionRequiresQuestion(item) {
+const supplementaryDataShapeDecisionPattern = /(?:required[_ -]?(?:field|attribute)|(?:input|item|object|entity|inventory)[_ -]?(?:fields?|attributes?|granularity)|(?:field|attribute)[_ -]?(?:requirement|selection)|(?:data|representation)[_ -]?granularity|metadata|必須項目|必須属性|入力項目|データ粒度|表現粒度)/i;
+const explicitSupplementaryDataPattern = /(?:quantity|amount|weight|unit|expiry|expiration|category|metadata|数量|分量|重量|単位|期限|賞味期限|消費期限|カテゴリ|属性)/i;
+const actorScopeDecisionPattern = /(?:^|[_ -])(?:actor|user|audience|role)[_ -]?(?:scope|model|type)(?:$|[_ -])|(?:利用者|ユーザー)(?:範囲|種別)|アカウント構造/i;
+const multiActorProductPattern = /(?:家族|チーム|社内|会社|組織|共同|共有|管理者|保護者|子ども|子供|出品者|購入者|貸す|借りる|予約|承認|複数人|multi.?user|family|team|company|organization|shared|admin|parent|child|seller|buyer|lend|borrow|book|reserv|approval)/i;
+const explicitSingleUserBoundaryPattern = /(?:単一(?:ユーザー|利用者|端末)|個人(?:利用|で使)|1デバイス1ユーザー|アカウント不要|端末単独|single.?user|one.?user|no account)/i;
+
+function explicitProductSourceText(context) {
+  return [context?.idea, ...(context?.facts ?? []).filter((fact) => fact.source === SOURCE.INITIAL || fact.source === SOURCE.USER).map((fact) => `${fact.key} ${fact.value}`)].filter(Boolean).join("\n");
+}
+
+function contextMakesDecisionNonblocking(context, item) {
+  if (!context) return false;
+  const candidate = `${item?.decisionDomain ?? item?.key ?? ""} ${item?.reason ?? ""} ${item?.rationale ?? ""}`;
+  const source = explicitProductSourceText(context);
+  if (supplementaryDataShapeDecisionPattern.test(candidate) && !explicitSupplementaryDataPattern.test(source)) return true;
+  // Once the user has explicitly chosen a single-user/no-account boundary,
+  // asking again whether the product is multi-user is a duplicate product
+  // decision. Conversely, collaboration/transaction ideas still keep actor
+  // scope user-owned.
+  return actorScopeDecisionPattern.test(candidate)
+    && explicitSingleUserBoundaryPattern.test(source)
+    && !multiActorProductPattern.test(String(context?.idea ?? ""));
+}
+
+export function criticalDecisionRequiresQuestion(item, context = null) {
   const necessity = item?.necessity;
+  if (contextMakesDecisionNonblocking(context, item)) return false;
   if (!necessity) return true;
+  const hasStructuredMaterialImpact = Object.values(necessity.productImpact ?? {}).some((value) => value === true);
+  // A convenience default cannot settle a choice whose alternatives change
+  // the product contract.  The provider reports those generic impact axes
+  // explicitly so this guard does not depend on an app genre or domain name.
+  if (hasStructuredMaterialImpact && necessity.derivableFromConfirmedDecision === false) return true;
   return necessity.requiresUserDecision === true
     && necessity.safeMvpDefaultAvailable === false
     && necessity.materiallyChangesProduct === true
@@ -361,7 +413,7 @@ function primaryFlowCompleteness(context) {
 function analysisCriticalProductDecisions(context) {
   const initial = (context?.analysis?.criticalProductDecisions ?? [])
     .filter((item) => item?.decisionDomain)
-    .filter(criticalDecisionRequiresQuestion)
+    .filter((item) => criticalDecisionRequiresQuestion(item, context))
     .map((item) => ({
       decisionDomain: canonicalDecisionDomain(item.decisionDomain, item.decisionDomain),
       resolvedByInitialInput: item.resolvedByInitialInput === true,
@@ -371,7 +423,7 @@ function analysisCriticalProductDecisions(context) {
     .filter((item) => !invariantDomains(context).has(item.decisionDomain));
   const reevaluated = (context?.reassessedCriticalProductDecisions ?? [])
     .filter((item) => item?.decisionDomain)
-    .filter(criticalDecisionRequiresQuestion)
+    .filter((item) => criticalDecisionRequiresQuestion(item, context))
     .map((item) => ({
       decisionDomain: canonicalDecisionDomain(item.decisionDomain, item.decisionDomain),
       resolvedByInitialInput: false,
@@ -398,6 +450,8 @@ export function completionGate(context) {
   const criticalDecisionDomains = hasDirectProductDecision
     ? [...new Set([...directProductDomains, ...analysisDecisions.map((item) => item.decisionDomain)])]
     : context?.analysis && flowCoverage.primaryAction.resolved ? [] : [fallbackDomain];
+  const knownDecisionDomains = [...criticalDecisionDomains, ...(context?.answeredDecisionDomains ?? []), ...(context?.inferredDecisionDomains ?? [])];
+  if (coreOutputEligibilityNeedsDecision(context, knownDecisionDomains)) criticalDecisionDomains.push("core_output_eligibility");
   if (!flowCoverage.primaryAction.resolved && !criticalDecisionDomains.includes("primary_flow_definition")) criticalDecisionDomains.push("primary_flow_definition");
   if (!flowCoverage.actor.resolved && !criticalDecisionDomains.some(actorDomainSignal)) criticalDecisionDomains.push("actor_scope");
   if (!flowCoverage.managedObject.resolved && !criticalDecisionDomains.some(managedObjectDomainSignal)) criticalDecisionDomains.push("managed_object_definition");
@@ -475,6 +529,30 @@ function completionQuestion(context, missing) {
         title: "このアプリでは、対象の何を中心に管理しますか？", intent: "主要な画面と扱う情報の中心を決めます。", options,
         recommended: options[0], recommendationReason: "まずは管理対象の基本情報を整理すると、最小のMVPを作りやすいためです。",
         decisionDomain: domain, decisionBoundary: "primary_flow", informationGain: "high", architecturalImpact: "major",
+        necessity: { requiredForCoreValue: true, requiredForPrimaryFlow: true, clarifiesExplicitUserRequest: true, changesProductBehavior: true, introducesNewFeature: false, implementationDetailOnly: false, derivedOnlyFromAIInference: false, decisionClass: "product", requiresUserDecision: true },
+      },
+    };
+  }
+  if (domain === "core_output_eligibility") {
+    const options = ["条件をすべて満たす候補だけを含める", "一部の条件を満たす候補も理由付きで含める", "その他・自由回答"];
+    return {
+      id: domain, label: "候補に含める基準", importance: "high", userJudgmentRequired: true, known: false, value: null, questionDepth: 0,
+      question: {
+        title: "どの条件を満たす候補を結果に含めますか？", intent: "結果として提示する候補の範囲を決めます。", options,
+        recommended: options[0], recommendationReason: "条件を満たす候補だけに絞ると、結果の意味が明確になるためです。",
+        decisionDomain: domain, decisionBoundary: "core_value", informationGain: "high", architecturalImpact: "major",
+        necessity: { requiredForCoreValue: true, requiredForPrimaryFlow: true, clarifiesExplicitUserRequest: true, changesProductBehavior: true, introducesNewFeature: false, implementationDetailOnly: false, derivedOnlyFromAIInference: false, decisionClass: "product", requiresUserDecision: true },
+      },
+    };
+  }
+  if (/(?:content|catalog|dataset|knowledge|recipe)[_ -]?(?:source|coverage|collection)|(?:source|coverage)[_ -]?(?:content|catalog|dataset|recipe)/i.test(domain)) {
+    const options = ["必要な候補データをアプリに内蔵する", "外部サービスから候補データを取得する", "その他・自由回答"];
+    return {
+      id: domain, label: "候補データの用意方法", importance: "high", userJudgmentRequired: true, known: false, value: null, questionDepth: 0,
+      question: {
+        title: "提案に使う候補データは、どのように用意しますか？", intent: "候補の範囲と、外部サービスへの依存有無を決めます。", options,
+        recommended: options[0], recommendationReason: "小規模なMVPでは、必要な候補を内蔵すると外部サービスなしで動かせるためです。",
+        decisionDomain: domain, decisionBoundary: "mvp_feature", informationGain: "high", architecturalImpact: "major",
         necessity: { requiredForCoreValue: true, requiredForPrimaryFlow: true, clarifiesExplicitUserRequest: true, changesProductBehavior: true, introducesNewFeature: false, implementationDetailOnly: false, derivedOnlyFromAIInference: false, decisionClass: "product", requiresUserDecision: true },
       },
     };
@@ -564,6 +642,7 @@ function questionIsAllowed(question, questionDepth = 0, context = null) {
   if (context) {
     const domain = canonicalDecisionDomain(question, questionDomain(question));
     if (invariantDomains(context).has(domain)) return false;
+    if (contextMakesDecisionNonblocking(context, { decisionDomain: domain, reason: questionText(question) })) return false;
     const sanitized = sanitizeQuestionOptions(question, context);
     if (sanitized.options.length < 2 || sanitized.presentationUnsafe) return false;
   }
@@ -764,7 +843,7 @@ export function recordInference(context, inference) {
   const nextQuestionDepth = Math.max(1, answeredFollowupDepth + 1);
   const settledDomains = new Set([...(withInvariants.answeredDecisionDomains ?? []), ...(withInvariants.inferredDecisionDomains ?? []), ...requirements.map((item) => item.decisionDomain).filter(Boolean), ...invariantDomains(withInvariants)].map((domain) => canonicalDecisionDomain(domain, domain)));
   const rejectedCriticalDomains = (grouped.criticalProductDecisions ?? [])
-    .filter((item) => item?.decisionDomain && !criticalDecisionRequiresQuestion(item))
+    .filter((item) => item?.decisionDomain && !criticalDecisionRequiresQuestion(item, withInvariants))
     .map((item) => canonicalDecisionDomain(item.decisionDomain, item.decisionDomain));
   const clarificationDimensions = uniqueByKey(grouped.clarificationQuestions ?? [])
     .filter((item) => {
@@ -773,7 +852,15 @@ export function recordInference(context, inference) {
         && !withInvariants.dimensions.some((dimension) => dimension.id === item.id) && !(withInvariants.answeredQuestionKeys ?? []).includes(item.id)
         && !settledDomains.has(domain) && !invariantDomains(withInvariants).has(domain) && questionPassesDecisionGate(item.question, nextQuestionDepth);
     })
-    .map((item) => ({ id: item.id, label: item.label, importance: item.importance, userJudgmentRequired: true, known: false, value: null, questionDepth: nextQuestionDepth, question: sanitizeQuestionOptions(item.question, withInvariants) }));
+    .map((item) => {
+      const domain = canonicalDecisionDomain(item.question, item.id);
+      const question = sanitizeQuestionOptions(item.question, withInvariants);
+      if (question.presentationUnsafe) {
+        const replacement = completionQuestion(withInvariants, { decisionDomain: domain, reason: item.question?.intent ?? item.label });
+        return { ...replacement, id: item.id, questionDepth: nextQuestionDepth };
+      }
+      return { id: item.id, label: item.label, importance: item.importance, userJudgmentRequired: true, known: false, value: null, questionDepth: nextQuestionDepth, question };
+    });
   const stateTransitionGaps = uniqueByKey(grouped.stateTransitionGaps ?? []).filter((gap) => gap?.id);
   const stateGapDimensions = stateTransitionGaps
     .filter((gap) => gap.requiresProductDecision && gap.question && !withInvariants.dimensions.some((dimension) => dimension.id === gap.id) && !(withInvariants.answeredQuestionKeys ?? []).includes(gap.id))
@@ -786,7 +873,7 @@ export function recordInference(context, inference) {
     implementationProposals: proposals, futureOptional, stateTransitionGaps,
     reassessedCriticalProductDecisions: uniqueByKey([...(withInvariants.reassessedCriticalProductDecisions ?? []), ...(grouped.criticalProductDecisions ?? [])]
       .filter((item) => item?.decisionDomain)
-      .filter(criticalDecisionRequiresQuestion)
+      .filter((item) => criticalDecisionRequiresQuestion(item, withInvariants))
       .filter((item) => !isDecisionDomainSettled(withInvariants, item.decisionDomain))
       .map((item) => ({
         ...item,
@@ -803,9 +890,9 @@ export function recordInference(context, inference) {
  * through the same inference/question guards as ordinary reassessment. */
 export function applyCriticalDecisionCoverageAudit(context, audit) {
   const returnedCriticalProductDecisions = audit?.criticalProductDecisions ?? [];
-  const rejectedNonCriticalDecisions = returnedCriticalProductDecisions.filter((item) => !criticalDecisionRequiresQuestion(item));
+  const rejectedNonCriticalDecisions = returnedCriticalProductDecisions.filter((item) => !criticalDecisionRequiresQuestion(item, context));
   const criticalProductDecisions = returnedCriticalProductDecisions
-    .filter(criticalDecisionRequiresQuestion)
+    .filter((item) => criticalDecisionRequiresQuestion(item, context))
     .filter((item) => !isDecisionDomainSettled(context, item.decisionDomain));
   const criticalDomains = criticalProductDecisions.map((item) => item.decisionDomain);
   const clarificationQuestions = (audit?.clarificationQuestions ?? []).filter((item) => {
@@ -1226,6 +1313,28 @@ function expandReservationInvariants(context, spec, issues) {
   return { spec: repaired, actions };
 }
 
+function removeUngroundedConcepts(spec, issues) {
+  const concepts = issues
+    .filter((issue) => issue.ruleId === "ungrounded_product_concept")
+    .map((issue) => /概念「([^」]+)」/.exec(String(issue.message ?? ""))?.[1])
+    .filter(Boolean);
+  if (!concepts.length) return { spec, actions: [] };
+  const repaired = { ...spec };
+  for (const key of Object.keys(repaired)) {
+    let text = String(repaired[key] ?? "");
+    for (const concept of concepts) {
+      const escaped = concept.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      text = text
+        .replace(new RegExp(`(?:[・/／、]|および|または)?${escaped}(?:操作)?`, "gi"), "")
+        .replace(/[・/／、]{2,}/g, "・")
+        .replace(/([（(])\s*[）)]/g, "")
+        .replace(/\s{2,}/g, " ");
+    }
+    repaired[key] = text;
+  }
+  return { spec: repaired, actions: concepts.map((concept) => `remove_ungrounded_concept:${concept}`) };
+}
+
 /** Applies the immutable-source precedence before asking the provider to regenerate a failed SPEC. */
 export function repairConsistency(context, spec, issues = []) {
   const confirmed = context.facts.filter((fact) => fact.source === SOURCE.USER);
@@ -1239,7 +1348,8 @@ export function repairConsistency(context, spec, issues = []) {
   const implementationProposals = (context.implementationProposals ?? []).filter((item) => (!deviceOnly || !cloudDependent(item)) && !nonMandatoryLeakIds.has(item.key));
   const futureOptional = (context.futureOptional ?? []).filter((item) => (!deviceOnly || !cloudDependent(item)) && !nonMandatoryLeakIds.has(item.key));
   const invariantExpansion = expandReservationInvariants(context, spec, issues);
-  const repairedSpec = { ...invariantExpansion.spec };
+  const ungroundedRepair = removeUngroundedConcepts(invariantExpansion.spec, issues);
+  const repairedSpec = { ...ungroundedRepair.spec };
   for (const key of Object.keys(repairedSpec)) {
     let text = String(repairedSpec[key] ?? "");
     text = generalizeUnconfirmedNumbers(context, text);
@@ -1261,7 +1371,7 @@ export function repairConsistency(context, spec, issues = []) {
   const canonicalChanged = JSON.stringify(context.canonicalRequirements ?? buildCanonicalRequirements(context)) !== JSON.stringify(preparedContext.canonicalRequirements);
   return {
     context: preparedContext, spec: normalizedSpec, repairDirectives, canonicalChanged,
-    repairActions: invariantExpansion.actions,
+    repairActions: [...invariantExpansion.actions, ...ungroundedRepair.actions],
     removedCloudItems: deviceOnly ? context.facts.length - facts.length : 0,
     removedSemanticDuplicates: context.facts.filter((fact) => fact.source === SOURCE.AI).length - canonical.aiInferredRequirements.length,
     confirmed,
@@ -1273,7 +1383,9 @@ export function canonicalizeSpec(context, spec) {
   const normalized = { ...spec };
   for (const key of Object.keys(normalized)) normalized[key] = normalizeThresholdComparison(context, normalized[key]);
   if (localOnly(context)) {
-    for (const key of Object.keys(normalized)) normalized[key] = normalizeLocalOnlySyncText(normalized[key]);
+    for (const key of Object.keys(normalized)) {
+      if (key !== "outOfScope") normalized[key] = normalizeLocalOnlySyncText(normalized[key]);
+    }
   }
   for (const key of Object.keys(normalized)) normalized[key] = generalizeUnconfirmedNumbers(context, normalized[key]);
   if (unconfirmedMinQuantityDefault(context, normalized.dataModel)) {
@@ -1381,8 +1493,16 @@ function nonMandatoryFeatureLeak(model, mandatoryText) {
     ...model.futureOptional.map((item) => ({ key: item.key, text: `${item.key ?? ""} ${item.value ?? ""}`, category: "Future / Optional" })),
   ];
   const source = String(mandatoryText ?? "").toLowerCase();
+  const grounded = JSON.stringify({
+    initial: model.idea ?? "",
+    confirmed: model.userConfirmed,
+    inferred: model.aiInferredRequirements,
+  }).toLowerCase();
   return candidates.find((candidate) => meaningfulFeatureTerms(candidate.text)
     .filter((term) => term.length >= 3)
+    // A proposal may discuss a confirmed capability without owning it. Only
+    // proposal-specific concepts can prove an improper promotion.
+    .filter((term) => !grounded.includes(term.toLowerCase()))
     .some((term) => source.includes(term.toLowerCase()))) ?? null;
 }
 
@@ -1531,7 +1651,7 @@ export function validateSpecConsistency(context, spec) {
     if (!editSections.includes(editPolicy)) issues.push({ section: "User Confirmed Decisions", severity: "error", message: "User Confirmedの編集方針がSPEC全体へ一意に反映されていません。", suggestedFix: "保存前の編集画面経由と、料理名変更は任意であることを明記してください。" });
     if (/(?:料理名(?:の)?変更|name change).{0,20}(?:必須|must|required)/i.test(editSections)) issues.push({ section: "User Confirmed Decisions", severity: "error", message: "料理名の変更可能と変更必須が混同されています。", suggestedFix: "編集画面への遷移だけを必須にし、変更操作そのものは任意としてください。" });
   }
-  if (localOnly(context) && hasAffirmativeNetworkSync(finalText)) issues.push({ section: "Local data", severity: "error", message: "ローカル保存MVPにネットワーク同期を示す表現が含まれています。", suggestedFix: "同一ローカルデータを参照する画面への即時反映として記載してください。" });
+  if (localOnly(context) && hasAffirmativeNetworkSync(mandatoryText)) issues.push({ section: "Local data", severity: "error", message: "ローカル保存MVPにネットワーク同期を示す表現が含まれています。", suggestedFix: "同一ローカルデータを参照する画面への即時反映として記載してください。" });
   if (deviceOnlyProcessing(context) && /cloud|クラウド|external\s*ai|外部AI|remote\s*api/i.test(mandatoryText)) issues.push({ section: "Photo processing privacy", severity: "error", message: "端末内処理というUser Confirmed Decisionに反するクラウド依存がMVP必須仕様に含まれています。", suggestedFix: "クラウドAI・外部API・クラウド保存を削除し、端末内処理へ整合させてください。" });
   if (/(高度|本格|充実|advanced|comprehensive)/i.test(confirmedText) && /(ゲーム化|ゲーミフィケーション|gamification)/i.test(confirmedText) && /(最小限.*(ゲーム化|ゲーミフィケーション)|バッジだけ|限定.*(バッジ|報酬))/i.test(finalText)) {
     issues.push({ section: "User Confirmed Decisions", severity: "error", message: "ユーザーが求めた高度なゲーム化がAIによって縮小されています。", suggestedFix: "詳細を質問し、ユーザー回答をそのまま仕様へ反映してください。" });

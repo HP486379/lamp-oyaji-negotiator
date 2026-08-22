@@ -16,7 +16,14 @@ app.set("trust proxy", trustProxy);
 const usageConfig = usageGuardConfig();
 const safetyConfig = requestSafetyConfig();
 const aiUsageGuard = new AIUsageGuard({ config: usageConfig, diagnostic });
-diagnostic("server_boot", { runtime_revision: "completion-gate-provenance-v3", port, trust_proxy: trustProxy, ai_usage_limits_enabled: usageConfig.enabled, max_idea_chars: safetyConfig.maxIdeaChars, json_body_limit: safetyConfig.jsonBodyLimit });
+const questionNecessary = (item) => {
+  const necessity = item?.necessity ?? {};
+  return (Object.values(necessity.productImpact ?? {}).some((value) => value === true)
+    && necessity.derivableFromConfirmedDecision === false)
+    || (necessity.requiresUserDecision === true && necessity.safeMvpDefaultAvailable === false
+      && necessity.materiallyChangesProduct === true && necessity.derivableFromConfirmedDecision === false);
+};
+diagnostic("server_boot", { runtime_revision: "critical-product-impact-v1", port, trust_proxy: trustProxy, ai_usage_limits_enabled: usageConfig.enabled, max_idea_chars: safetyConfig.maxIdeaChars, json_body_limit: safetyConfig.jsonBodyLimit });
 app.use(createJsonBodyParser(safetyConfig.jsonBodyLimit));
 const parkingStore = new ParkingStore();
 const parkingRoute = (handler) => async (req, res) => {
@@ -61,8 +68,8 @@ app.post("/api/requirements/infer-mvp", requirementsRoute("infer-mvp", async (re
     answered_decision_domains: context.answeredDecisionDomains ?? [],
     unresolved_before: (context.completionGate?.unresolvedCriticalProductDecisions ?? []).map((item) => item.decisionDomain),
     returned_critical_domains: (result.criticalProductDecisions ?? []).map((item) => item.decisionDomain),
-    question_necessary_domains: (result.criticalProductDecisions ?? []).filter((item) => item.necessity?.requiresUserDecision === true && item.necessity?.safeMvpDefaultAvailable === false && item.necessity?.materiallyChangesProduct === true && item.necessity?.derivableFromConfirmedDecision === false).map((item) => item.decisionDomain),
-    nonblocking_defaultable_domains: (result.criticalProductDecisions ?? []).filter((item) => item.necessity?.safeMvpDefaultAvailable === true || item.necessity?.materiallyChangesProduct === false || item.necessity?.derivableFromConfirmedDecision === true || item.necessity?.requiresUserDecision === false).map((item) => item.decisionDomain),
+    question_necessary_domains: (result.criticalProductDecisions ?? []).filter(questionNecessary).map((item) => item.decisionDomain),
+    nonblocking_defaultable_domains: (result.criticalProductDecisions ?? []).filter((item) => !questionNecessary(item)).map((item) => item.decisionDomain),
     returned_question_domains: (result.clarificationQuestions ?? []).map((item) => item.question?.decisionDomain ?? item.id),
     returned_inference_ids: (result.aiInferredRequirements ?? []).map((item) => item.key),
   });
@@ -76,8 +83,8 @@ app.post("/api/requirements/coverage-audit", requirementsRoute("coverage-audit",
     coverage_complete: result.coverageComplete,
     audited_domain_count: result.auditedDecisionDomains?.length ?? 0,
     discovered_critical_domains: (result.criticalProductDecisions ?? []).map((item) => item.decisionDomain),
-    question_necessary_domains: (result.criticalProductDecisions ?? []).filter((item) => item.necessity?.requiresUserDecision === true && item.necessity?.safeMvpDefaultAvailable === false && item.necessity?.materiallyChangesProduct === true && item.necessity?.derivableFromConfirmedDecision === false).map((item) => item.decisionDomain),
-    nonblocking_defaultable_domains: (result.criticalProductDecisions ?? []).filter((item) => item.necessity?.safeMvpDefaultAvailable === true || item.necessity?.materiallyChangesProduct === false || item.necessity?.derivableFromConfirmedDecision === true || item.necessity?.requiresUserDecision === false).map((item) => item.decisionDomain),
+    question_necessary_domains: (result.criticalProductDecisions ?? []).filter(questionNecessary).map((item) => item.decisionDomain),
+    nonblocking_defaultable_domains: (result.criticalProductDecisions ?? []).filter((item) => !questionNecessary(item)).map((item) => item.decisionDomain),
     returned_question_domains: (result.clarificationQuestions ?? []).map((item) => item.question?.decisionDomain ?? item.id),
     returned_inference_ids: (result.aiInferredRequirements ?? []).map((item) => item.key),
     returned_proposal_ids: (result.implementationProposals ?? []).map((item) => item.key),
