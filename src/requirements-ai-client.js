@@ -1,5 +1,8 @@
-async function request(path, body) {
+async function request(path, body, { signal } = {}) {
   const controller = new AbortController();
+  const abortFromCaller = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  else signal?.addEventListener("abort", abortFromCaller, { once: true });
   // The server owns the OpenAI deadline. Browser deadlines are deliberately
   // longer so a healthy server request is never abandoned while still in
   // flight, which previously left duplicate retries running concurrently.
@@ -18,15 +21,16 @@ async function request(path, body) {
   } catch (error) {
     if (error.name === "AbortError") throw new Error("AI処理がタイムアウトしました。再試行してください。");
     throw error;
-  } finally { clearTimeout(timer); }
+  } finally { clearTimeout(timer); signal?.removeEventListener("abort", abortFromCaller); }
 }
 export class HttpRequirementsAI {
-  startProject(idea) { return request("start", { idea }); }
-  analyzeIdea(idea, sessionId) { return request("analyze", { idea, sessionId }); }
-  generateDimensions(context) { return request("dimensions", { context }); }
-  inferMvp(context) { return request("infer-mvp", { context }); }
-  auditCriticalDecisionCoverage(context) { return request("coverage-audit", { context }); }
-  generateSpec(context) { return request("generate-spec", { context }); }
-  validateSpec(context, spec) { return request("validate", { context, spec }); }
+  startProject(idea, options) { return request("start", { idea }, options); }
+  analyzeIdea(idea, sessionId, options) { return request("analyze", { idea, sessionId }, options); }
+  generateDimensions(context, options) { return request("dimensions", { context }, options); }
+  inferMvp(context, options) { return request("infer-mvp", { context }, options); }
+  auditCriticalDecisionCoverage(context, options) { return request("coverage-audit", { context }, options); }
+  generateSpec(context, options) { return request("generate-spec", { context }, options); }
+  validateSpec(context, spec, options) { return request("validate", { context, spec }, options); }
 }
+
 

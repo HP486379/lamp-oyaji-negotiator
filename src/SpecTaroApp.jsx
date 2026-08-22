@@ -1,9 +1,10 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import "./spectaro.css";
 import "./lamp-brand.css";
 import "./guide-avatar-image.css";
 import guidePortrait from "./assets/lamp-oyaji-office.png";
 import { HttpRequirementsAI } from "./requirements-ai-client.js";
+import { SessionRequestGuard } from "./session-request-guard.js";
 import { processingFailureState, retryableOperation } from "./negotiation-retry-state.js";
 import {
   SOURCE,
@@ -46,6 +47,9 @@ export default function SpecTaroApp({ ai = new HttpRequirementsAI() }) {
   const [idea, setIdea] = useState("");
   const [freeAnswer, setFreeAnswer] = useState("");
   const [state, setState] = useState(blank);
+  const requestGuardRef = useRef(null);
+  if (!requestGuardRef.current) requestGuardRef.current = new SessionRequestGuard();
+  const requestGuard = requestGuardRef.current;
   const counts = useMemo(() => state.context ? sourceCounts(state.context) : null, [state.context]);
   const logSessionTrace = (context, extra = {}) => {
     if (import.meta.env.DEV && context) console.info("[spec-session-trace]", buildSessionTrace(context, extra));
@@ -54,80 +58,98 @@ export default function SpecTaroApp({ ai = new HttpRequirementsAI() }) {
     if (import.meta.env.DEV) console.info("[negotiation-state]", { from, to, sessionId: context?.sessionId ?? null, decisionFingerprint: context?.finalConfirmationFingerprint ?? null, ...extra });
   };
 
-  const fail = (error, failedOperation) => setState((current) => processingFailureState(current, error, failedOperation));
-  const showThinking = (context, lineIndex = 0) => setState((current) => ({ ...current, context, question: null, busy: true, error: "", failedOperation: null, phase: "thinking", thinkingLine: thinkingLines[lineIndex % thinkingLines.length], displayProgress: monotonicDisplayProgress(current.displayProgress, calculatedConversationProgress(context)) }));
-  const continueWith = (context, detailMode = state.detailMode) => {
+  const fail = (error, failedOperation, request = null) => setState((current) => request && !request.isCurrent() ? current : processingFailureState(current, error, failedOperation));
+  const showThinking = (context, lineIndex = 0, request = null) => setState((current) => request && !request.isCurrent() ? current : ({ ...current, context, question: null, busy: true, error: "", failedOperation: null, phase: "thinking", thinkingLine: thinkingLines[lineIndex % thinkingLines.length], displayProgress: monotonicDisplayProgress(current.displayProgress, calculatedConversationProgress(context)) }));
+  const continueWith = (context, detailMode = state.detailMode, request = null) => {
+    if (request && !request.isCurrent()) return;
     const completedContext = ensureCompletionQuestion(context);
     const question = planNext(completedContext, detailMode);
     logSessionTrace(completedContext);
     if (!question && !completionGate(completedContext).complete) {
-      return fail(new Error("Completion Gateが未完了のまま最終確認へ進もうとしました。"), retryableOperation("coverage_audit", completedContext, { detailMode }));
+      return fail(new Error("Completion Gateが未完了のまま最終確認へ進もうとしました。"), retryableOperation("coverage_audit", completedContext, { detailMode }), request);
     }
     let nextContext = completedContext;
     if (!question) {
       const registration = registerFinalConfirmation(completedContext);
-      if (registration.loopDetected) return fail(new Error("同じ内容の最終確認を再表示しようとしたため停止しました。"), null);
+      if (registration.loopDetected) return fail(new Error("同じ内容の最終確認を再表示しようとしたため停止しました。"), null, request);
       nextContext = { ...registration.context, status: "final_confirmation" };
       logTransition("coverage_audit", "final_confirmation", nextContext, { finalConfirmationFingerprint: registration.fingerprint });
     } else logTransition("coverage_audit", "questioning", nextContext, { decisionDomain: question.question?.decisionDomain ?? question.id });
     const genuineCriticalDecisionDiscovered = (nextContext.criticalDecisionCoverageAudit?.discoveredDecisionDomains?.length ?? 0) > 0
       && nextContext.criticalDecisionCoverageAudit?.complete === false;
-    setState((current) => ({ ...current, context: nextContext, question, busy: false, error: "", failedOperation: null, phase: question ? "question" : "review", showWhy: false, displayProgress: monotonicDisplayProgress(current.displayProgress, calculatedConversationProgress(nextContext), genuineCriticalDecisionDiscovered) }));
+    setState((current) => request && !request.isCurrent() ? current : ({ ...current, context: nextContext, question, busy: false, error: "", failedOperation: null, phase: question ? "question" : "review", showWhy: false, displayProgress: monotonicDisplayProgress(current.displayProgress, calculatedConversationProgress(nextContext), genuineCriticalDecisionDiscovered) }));
   };
 
   async function start() {
     const session = enableCriticalDecisionCoverageAudit(createProjectContext(idea));
+    requestGuard.beginSession(session.sessionId);
     return runAnalysis(session);
   }
 
   async function runAnalysis(session) {
-    showThinking(session);
+    const request = requestGuard.beginRequest(session.sessionId);
+    if (!request.isCurrent()) return;
+    showThinking(session, 0, request);
     try {
-      const analysis = await ai.analyzeIdea(session.idea, session.sessionId);
+      const analysis = await ai.analyzeIdea(session.idea, session.sessionId, { signal: request.signal });
+      if (!request.isCurrent()) return;
       const analyzed = applyAnalysis(session, analysis);
       return runDimensions(analyzed);
-    } catch (error) { fail(error, retryableOperation("analysis", session)); }
+    } catch (error) { fail(error, retryableOperation("analysis", session), request); }
+    finally { request.finish(); }
   }
 
   async function runDimensions(analyzed) {
-    showThinking(analyzed);
+    const request = requestGuard.beginRequest(analyzed.sessionId);
+    if (!request.isCurrent()) return;
+    showThinking(analyzed, 0, request);
     try {
-      const dimensions = await ai.generateDimensions(analyzed);
+      const dimensions = await ai.generateDimensions(analyzed, { signal: request.signal });
+      if (!request.isCurrent()) return;
       const dimensioned = setDimensions(analyzed, dimensions);
       logSessionTrace(dimensioned);
-      return advance(dimensioned);
-    } catch (error) { fail(error, retryableOperation("dimensions", analyzed)); }
+      return advance(dimensioned, request);
+    } catch (error) { fail(error, retryableOperation("dimensions", analyzed), request); }
+    finally { request.finish(); }
   }
 
-  async function advance(context) {
+  async function advance(context, request = null) {
     const directQuestion = planNext(context, state.detailMode);
-    if (directQuestion) return continueWith(context);
+    if (directQuestion) return continueWith(context, state.detailMode, request);
     return runInference(context, state.detailMode);
   }
 
   async function runInference(context, detailMode = state.detailMode) {
-    showThinking(context, context.history?.length ?? 1);
+    const request = requestGuard.beginRequest(context.sessionId);
+    if (!request.isCurrent()) return;
+    showThinking(context, context.history?.length ?? 1, request);
     try {
-      const inference = await ai.inferMvp(context);
+      const inference = await ai.inferMvp(context, { signal: request.signal });
+      if (!request.isCurrent()) return;
       const inferred = recordInference(context, inference);
       logSessionTrace(inferred);
       const prepared = ensureCompletionQuestion(inferred);
-      if (planNext(prepared, detailMode)) return continueWith(prepared, detailMode);
+      if (planNext(prepared, detailMode)) return continueWith(prepared, detailMode, request);
       if (completionGate(prepared).coverageAuditPending) {
         return runCoverageAudit(prepared, detailMode);
       }
-      continueWith(prepared, detailMode);
-    } catch (error) { fail(error, retryableOperation("inference", context, { detailMode })); }
+      continueWith(prepared, detailMode, request);
+    } catch (error) { fail(error, retryableOperation("inference", context, { detailMode }), request); }
+    finally { request.finish(); }
   }
 
   async function runCoverageAudit(context, detailMode = state.detailMode) {
-    showThinking(context, context.history?.length ?? 1);
+    const request = requestGuard.beginRequest(context.sessionId);
+    if (!request.isCurrent()) return;
+    showThinking(context, context.history?.length ?? 1, request);
     try {
-      const audit = await ai.auditCriticalDecisionCoverage(context);
+      const audit = await ai.auditCriticalDecisionCoverage(context, { signal: request.signal });
+      if (!request.isCurrent()) return;
       const audited = applyCriticalDecisionCoverageAudit(context, audit);
       logSessionTrace(audited);
-      return continueWith(audited, detailMode);
-    } catch (error) { fail(error, retryableOperation("coverage_audit", context, { detailMode })); }
+      return continueWith(audited, detailMode, request);
+    } catch (error) { fail(error, retryableOperation("coverage_audit", context, { detailMode }), request); }
+    finally { request.finish(); }
   }
 
   function retryFailedOperation() {
@@ -150,19 +172,23 @@ export default function SpecTaroApp({ ai = new HttpRequirementsAI() }) {
   async function runFinalCoverageCheck(context) {
     const checkingContext = { ...context, status: "final_coverage_check" };
     logTransition("user_confirmed", "final_coverage_check", checkingContext);
-    showThinking(checkingContext, checkingContext.history?.length ?? 1);
+    const request = requestGuard.beginRequest(checkingContext.sessionId);
+    if (!request.isCurrent()) return;
+    showThinking(checkingContext, checkingContext.history?.length ?? 1, request);
     try {
-      const audit = await ai.auditCriticalDecisionCoverage(checkingContext);
+      const audit = await ai.auditCriticalDecisionCoverage(checkingContext, { signal: request.signal });
+      if (!request.isCurrent()) return;
       const audited = applyCriticalDecisionCoverageAudit(checkingContext, audit);
       const newQuestion = planNext(audited, state.detailMode);
       if (newQuestion) {
         logTransition("final_coverage_check", "questioning", audited, { decisionDomain: newQuestion.question?.decisionDomain ?? newQuestion.id });
-        return continueWith(audited, state.detailMode);
+        return continueWith(audited, state.detailMode, request);
       }
       if (!completionGate(audited).complete) throw new Error("最終coverage checkが新しい質問も完了判定も返しませんでした。");
       logTransition("final_coverage_check", "spec_generation", audited);
       return generateSpec(audited);
-    } catch (error) { fail(error, retryableOperation("final_coverage_audit", checkingContext)); }
+    } catch (error) { fail(error, retryableOperation("final_coverage_audit", checkingContext), request); }
+    finally { request.finish(); }
   }
 
   function answer(value, usedRecommendation = false) {
@@ -175,36 +201,41 @@ export default function SpecTaroApp({ ai = new HttpRequirementsAI() }) {
     if (!context) return;
     if (!completionGate(context).complete) return fail(new Error("最終確認後のCompletion Gateが未完了です。"), retryableOperation("final_coverage_audit", context));
     const generatingContext = { ...context, status: "generating" };
-    showThinking(generatingContext, 2);
+    const request = requestGuard.beginRequest(generatingContext.sessionId);
+    if (!request.isCurrent()) return;
+    showThinking(generatingContext, 2, request);
     try {
       const result = await runSpecRepairPipeline({
         context: generatingContext,
-        generateSpec: (context) => ai.generateSpec(context),
-        validateRemote: (context, spec) => ai.validateSpec(context, spec),
+        generateSpec: (context) => ai.generateSpec(context, { signal: request.signal }),
+        validateRemote: (context, spec) => ai.validateSpec(context, spec, { signal: request.signal }),
         onPhase: () => {},
         onDiagnostic: (entries) => console.info("[spec-validation]", entries),
       });
+      if (!request.isCurrent()) return;
       const markdown = buildMarkdown(result.context, result.spec);
       const completedContext = { ...result.context, generatedSpec: result.spec, validation: result.validation, status: "completed" };
       logSessionTrace(completedContext, { generatedSpec: result.spec, validationErrors: result.validation.issues, repairActions: result.trace.flatMap((step) => step.action ? [step.action] : []), retryCount: Math.max(0, result.trace.length - 1) });
-      setState((current) => ({ ...current, context: completedContext, markdown, busy: false, phase: "complete" }));
+      setState((current) => request.isCurrent() ? ({ ...current, context: completedContext, markdown, busy: false, phase: "complete" }) : current);
     } catch (error) {
+      if (!request.isCurrent()) return;
       const context = error?.context ?? generatingContext;
       const diagnostics = error?.repairTrace ? buildRepairDiagnostics({ context, trace: error.repairTrace, stopMessage: error.message }) : null;
       if (diagnostics) console.info("[spec-validation]", { event: "generation_failed", errorCount: diagnostics.errors.length, diagnostics });
       logSessionTrace(context, { validationErrors: error?.repairTrace?.at(-1)?.revalidationErrors ?? [], repairActions: error?.repairTrace?.map((step) => step.action).filter(Boolean) ?? [], retryCount: Math.max(0, (error?.repairTrace?.length ?? 1) - 1) });
-      setState((current) => ({
+      setState((current) => request.isCurrent() ? ({
         ...current,
         context: { ...context, status: "generation_failed", generationFailure: diagnostics },
         question: null,
         busy: false,
         phase: "generation_failed",
         error: error?.message || "SPEC.mdの生成に失敗しました。",
-      }));
+      }) : current);
     }
+    finally { request.finish(); }
   }
 
-  function reset() { setIdea(""); setFreeAnswer(""); setState(blank()); }
+  function reset() { requestGuard.invalidate(); setIdea(""); setFreeAnswer(""); setState(blank()); }
   function copy(value) { return navigator.clipboard.writeText(value); }
   function download() {
     const link = document.createElement("a");
@@ -240,4 +271,5 @@ export default function SpecTaroApp({ ai = new HttpRequirementsAI() }) {
     {counts && state.phase !== "start" && <footer className="conversation-footer">入力から把握 {counts[SOURCE.INITIAL]} ・ あなたが決定 {counts[SOURCE.USER]} ・ AIが補完 {counts[SOURCE.AI]}</footer>}
   </main>;
 }
+
 
