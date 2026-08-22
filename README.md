@@ -63,6 +63,8 @@ npm run dev
 | `AI_GLOBAL_DAILY_REQUEST_LIMIT` | いいえ | 全IP合計の日次AIリクエスト上限。既定値`1000` |
 | `AI_MAX_REQUESTS_PER_SESSION` | いいえ | 1セッションあたりのAIリクエスト上限。既定値`20` |
 | `AI_DAILY_SPEC_LIMIT_PER_IP` | いいえ | 1 IPあたりの日次SPECセッション上限。既定値`3` |
+| `AI_MAX_IDEA_CHARS` | いいえ | 最初のアイデア入力の最大文字数。既定値`8000` |
+| `HTTP_JSON_BODY_LIMIT` | いいえ | JSON request bodyの上限。既定値`256kb` |
 
 APIキーはブラウザへ渡しません。`.env`と`.env.*`はGit管理対象外で、公開可能な変数名だけを`.env.example`に記載しています。
 
@@ -71,6 +73,8 @@ APIキーはブラウザへ渡しません。`.env`と`.env.*`はGit管理対象
 OpenAI APIを呼ぶ要件定義APIには、IP単位の短時間・日次制限、全IP合計の日次制限、セッション単位の上限、IP単位の日次SPEC作成数制限、同一処理の実行中重複排除があります。SPEC作成数は、そのsessionIdで最初の分析を開始する時点で1件として数え、同じsessionIdの再分析・SPEC修復では重複加算しません。制限値は環境変数を設定しなくても安全な既定値で有効です。開発・テスト時に限り、`AI_USAGE_LIMITS_ENABLED=false`で明示的に無効化できます。
 
 現在の利用量カウンターは単一Node.jsプロセス内のメモリ方式です。サーバー再起動時にリセットされ、複数インスタンス間では共有されません。本番を複数インスタンスで運用する場合は、同じガードの保存層をRedis等の共有ストアへ置き換える必要があります。
+
+進行中のAI処理はsessionIdとrequest tokenで照合され、相談のリセット時には可能なHTTP処理を中断します。遅れて到着した古い応答やエラーは現在の相談へ反映されません。ideaとProjectContextはAIへの命令ではなく、分析対象となる信頼されていないデータとして明確に分離します。Prompt Injectionを題材にした正当なアイデアも内容を削除せず、その命令には従わず分析します。入力長とbody上限は上記の環境変数で変更できます。
 
 ## コマンド
 
@@ -82,4 +86,5 @@ npm run build
 ```
 
 実API用のスモークテストは有効な`OPENAI_API_KEY`を設定したローカル環境で実行してください。
+
 
