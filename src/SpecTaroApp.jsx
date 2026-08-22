@@ -1,3 +1,4 @@
+
 import { useMemo, useRef, useState } from "react";
 import "./spectaro.css";
 import "./lamp-brand.css";
@@ -18,6 +19,7 @@ import {
   confirmFinalDecisions,
   createProjectContext,
   enableCriticalDecisionCoverageAudit,
+  enableRequirementGrounding,
   ensureCompletionQuestion,
   majorDecisions,
   monotonicDisplayProgress,
@@ -81,7 +83,7 @@ export default function SpecTaroApp({ ai = new HttpRequirementsAI() }) {
   };
 
   async function start() {
-    const session = enableCriticalDecisionCoverageAudit(createProjectContext(idea));
+    const session = enableRequirementGrounding(enableCriticalDecisionCoverageAudit(createProjectContext(idea)));
     requestGuard.beginSession(session.sessionId);
     return runAnalysis(session);
   }
