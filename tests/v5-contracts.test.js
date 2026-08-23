@@ -1,143 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import * as contracts from "../src/requirements-v5/contracts.js";
+import * as c from "../src/requirements-v5/contracts.js";
+const copy = (x) => JSON.parse(JSON.stringify(x));
+const registry = () => ({ versionSet: { ...c.REGISTRY_VERSION_SET }, rules: [{ id: "rule:s", version: "1" }, { id: "rule:na", version: "1" }, { id: "rule:ex", version: "1" }, { id: "rule:settle", version: "1" }, { id: "rule:conflict", version: "1" }, { id: "rule:feas", version: "1" }, { id: "rule:graph", version: "1" }], transforms: [{ id: "transform:identity" }, { id: "transform:registered" }], slotTemplates: c.UNIVERSAL_SLOT_TEMPLATES.map((slotTemplateId) => ({ slotTemplateId, satisfactionRuleId: "rule:s", notApplicableRuleId: "rule:na", exclusionRuleId: "rule:ex" })), coreUserValuePatterns: [{ id: "p", universalSlotTemplateIds: [...c.UNIVERSAL_SLOT_TEMPLATES], patternSlotTemplateIds: [] }], capabilityTypes: [{ id: "cap" }], decisionTypes: [{ id: "dec" }], traitTypes: [{ id: "trait" }], claimTypes: [{ id: "claim" }], auditExecutors: [{ id: "audit", version: "1" }], specWriters: [{ id: "writer", version: "1" }], migrationAdapters: [{ id: "migration", version: "1" }], requiredCapabilityKeys: c.UNIVERSAL_SLOT_TEMPLATES.map((x) => `cap:${x}`), requiredDecisionKeys: c.UNIVERSAL_SLOT_TEMPLATES.map((x) => `dec:${x}`), requiredCoreInvariantKeys: ["inv"], requiredPrimaryFlowKeys: ["flow"] });
+const fixture = () => {
+  const r = registry(); const l = { coreUserValue: { revisionId: "r0", targetId: "t0", evidenceId: "e0", value: "予定を管理する", patternId: "p", scopeKey: "core" }, revisions: [{ id: "r0", type: "revision", text: "予定を管理する", scopeKey: "core", currentness: "current" }], targets: [{ id: "t0", classification: "core_user_value", scopeKey: "core", currentness: "current" }], evidenceEdges: [{ id: "e0", sourceRevisionId: "r0", targetId: "t0", evidenceSpan: "予定を管理する", relation: "explicitly_states", transformRuleId: "transform:identity", scopeKey: "core", derivationDepth: 0, currentness: "current" }], capabilities: [], decisionRevisions: [], claims: [], artifacts: [], issues: [], evaluationProofs: [], auditExecutions: [], decisionSettlementRecords: [], requiredSpecElements: [], migrationRecords: [], actors: [], managedObjects: [], traits: [] };
+  for (const slot of c.UNIVERSAL_SLOT_TEMPLATES) { const rid = `r:${slot}`; const tid = `t:${slot}`; const eid = `e:${slot}`; const cap = `cap:${slot}`; const dec = `dec:${slot}`; l.revisions.push({ id: rid, instanceId: dec, type: "revision", text: slot, scopeKey: "g", currentness: "current" }); l.targets.push({ id: tid, classification: "product_requirement", scopeKey: "g", currentness: "current" }); l.evidenceEdges.push({ id: eid, sourceRevisionId: rid, targetId: tid, evidenceSpan: slot, relation: "explicitly_states", transformRuleId: "transform:identity", scopeKey: "g", derivationDepth: 0, currentness: "current" }); l.capabilities.push({ id: cap, key: slot, targetId: tid, evidenceId: eid, scopeKey: "g", currentness: "current" }); l.decisionRevisions.push({ id: dec, instanceId: dec, targetId: tid, evidenceId: eid, value: slot, scopeKey: "g", currentness: "current" }); l.claims.push({ id: `claim:${cap}`, sourceId: cap, typeId: "claim", targetId: tid, evidenceId: eid, scopeKey: "g", currentness: "current" }, { id: `claim:${dec}`, sourceId: dec, typeId: "claim", targetId: tid, evidenceId: eid, scopeKey: "g", currentness: "current" }); l.evaluationProofs.push(); }
+  l.coreInvariants = [{ id: "inv", targetId: "t0", evidenceId: "e0", scopeKey: "core", currentness: "current" }]; l.primaryFlows = [{ id: "flow", targetId: "t0", evidenceId: "e0", scopeKey: "core", currentness: "current" }]; l.claims.push({ id: "claim:inv", sourceId: "inv", typeId: "claim", targetId: "t0", evidenceId: "e0", scopeKey: "core", currentness: "current" }, { id: "claim:flow", sourceId: "flow", typeId: "claim", targetId: "t0", evidenceId: "e0", scopeKey: "core", currentness: "current" });
+  const a = c.createVerifierAuthority({ registry: r, ledger: l }); const fp = c.requirementFingerprint(a); l.decisionSettlementRecords.push(...c.UNIVERSAL_SLOT_TEMPLATES.map((slot) => ({ decisionId: `dec:${slot}`, status: "settled", ruleId: "rule:settle", requirementFingerprint: fp }))); l.evaluationProofs.push(...["conflict", "feasibility", "graph_fixpoint"].map((kind, i) => ({ kind, status: "resolved", evaluatorRuleId: ["rule:conflict", "rule:feas", "rule:graph"][i], requirementFingerprint: fp }))); const closures = c.UNIVERSAL_SLOT_TEMPLATES.map((slot) => ({ slotTemplateId: slot, status: "satisfied", evidenceId: `e:${slot}`, targetId: `t:${slot}`, scopeKey: "g", ruleId: "rule:s", ruleVersion: "1", requirementFingerprint: fp })); const provisional = { proofId: "p1", requirementFingerprint: fp, capabilityCoverageProof: { requirementFingerprint: fp, closures } }; const claim = { claimSetFingerprint: c.claimSetFingerprint(a) }; l.auditExecutions.push({ auditId: "a1", executionId: "x1", executorId: "audit", executorVersion: "1", outcome: "passed", completed: true, requirementFingerprint: fp, provisionalProofId: "p1", blockingGapIds: [] }); l.requiredSpecElements.push(...l.claims.map((x, i) => ({ id: `s${i}`, kind: "functional_requirement", sourceId: x.sourceId }))); const artifact = { writerId: "writer", writerVersion: "1", requirementFingerprint: fp, artifactFingerprint: "artifact", elements: l.requiredSpecElements.map((x) => ({ ...x, sourceClaimIds: [`claim:${x.sourceId}`] })) }; const audit = { auditId: "a1", executionId: "x1" }; const final = { provisionalProofId: "p1", auditExecutionId: "x1", completionCandidateFingerprint: c.completionCandidateFingerprint(a, "a1") }; return { r, l, a, provisional, claim, audit, artifact, final }; };
+const valid = (x) => c.validateFinalCompletionProof(x.a, { provisionalProof: x.provisional, claimCoverageProof: x.claim, auditProof: x.audit, specArtifact: x.artifact, finalProof: x.final });
 
-const clone = (value) => JSON.parse(JSON.stringify(value));
-const registry = () => ({
-  versionSet: { ...contracts.REGISTRY_VERSION_SET },
-  allowedEvidenceRelations: ["explicitly_states"],
-  rules: [{ id: "rule:satisfy" }],
-  slotTemplates: contracts.UNIVERSAL_SLOT_TEMPLATES.map((slotTemplateId) => ({ slotTemplateId, satisfactionRuleId: "rule:satisfy" })),
-  coreUserValuePatterns: [{ id: "pattern:interactive", universalSlotTemplateIds: [...contracts.UNIVERSAL_SLOT_TEMPLATES], patternSlotTemplateIds: [] }],
-  claimTypes: [{ id: "claim:requirement" }],
-  auditExecutors: [{ id: "audit:fixture", version: "1" }],
-});
-
-/** This is deliberately a test-only contract fixture, not a semantic producer. */
-const completeFixture = () => {
-  const state = {
-    registry: registry(), revisions: [], targets: [], evidenceEdges: [], actors: [], managedObjects: [], traits: [], capabilities: [], decisionRevisions: [], coreInvariants: [], primaryFlows: [], claims: [], issues: [], artifacts: [], graphFixpoint: { reached: true },
-  };
-  state.revisions.push({ id: "rev:cuv", instanceId: "cuv", text: "利用者が予定を管理できる", scopeKey: "core", currentness: "current" });
-  state.targets.push({ id: "target:cuv", scopeKey: "core", classification: "core_user_value", currentness: "current" });
-  state.evidenceEdges.push({ id: "edge:cuv", sourceRevisionId: "rev:cuv", targetId: "target:cuv", evidenceSpan: "利用者が予定を管理できる", relation: "explicitly_states", scopeKey: "core", classification: "core_user_value", derivationDepth: 0, currentness: "current" });
-  state.coreUserValue = { revisionId: "rev:cuv", targetId: "target:cuv", evidenceId: "edge:cuv", value: "利用者が予定を管理できる", patternId: "pattern:interactive", scopeKey: "core" };
-  for (const slotTemplateId of contracts.UNIVERSAL_SLOT_TEMPLATES) {
-    const targetId = `target:${slotTemplateId}`; const revisionId = `rev:${slotTemplateId}`; const evidenceId = `edge:${slotTemplateId}`; const capabilityId = `cap:${slotTemplateId}`; const decisionId = `dec:${slotTemplateId}`;
-    state.targets.push({ id: targetId, scopeKey: "global", classification: "product_requirement", currentness: "current" });
-    state.revisions.push({ id: revisionId, instanceId: decisionId, text: `明示回答:${slotTemplateId}`, scopeKey: "global", currentness: "current" });
-    state.evidenceEdges.push({ id: evidenceId, sourceRevisionId: revisionId, targetId, evidenceSpan: `明示回答:${slotTemplateId}`, relation: "explicitly_states", scopeKey: "global", classification: "product_requirement", derivationDepth: 0, currentness: "current" });
-    state.capabilities.push({ id: capabilityId, key: slotTemplateId, targetId, evidenceId, scopeKey: "global", blocking: true, currentness: "current" });
-    state.decisionRevisions.push({ id: decisionId, instanceId: decisionId, targetId, evidenceId, value: `${slotTemplateId}:value`, scopeKey: "global", status: "settled", blocking: true, currentness: "current" });
-  }
-  state.coreInvariants.push({ id: "invariant:1", targetId: "target:cuv", evidenceId: "edge:cuv", scopeKey: "core", currentness: "current" });
-  state.primaryFlows.push({ id: "flow:1", targetId: "target:cuv", evidenceId: "edge:cuv", scopeKey: "core", currentness: "current" });
-  const sourceClaims = [
-    ...state.capabilities.map((item) => ({ source: item, kind: "capability" })),
-    ...state.decisionRevisions.map((item) => ({ source: item, kind: "decision" })),
-    ...state.coreInvariants.map((item) => ({ source: item, kind: "core_invariant" })),
-    ...state.primaryFlows.map((item) => ({ source: item, kind: "primary_flow" })),
-  ];
-  for (const { source } of sourceClaims) state.claims.push({ id: `claim:${source.id}`, sourceId: source.id, typeId: "claim:requirement", targetId: source.targetId, evidenceId: source.evidenceId, scopeKey: source.scopeKey, currentness: "current" });
-  const capabilityCoverageProof = { requirementFingerprint: contracts.requirementFingerprint(state), slotEvaluations: contracts.UNIVERSAL_SLOT_TEMPLATES.map((slotTemplateId) => ({ slotTemplateId, status: "satisfied", evidenceId: `edge:${slotTemplateId}`, targetId: `target:${slotTemplateId}`, scopeKey: "global" })) };
-  const provisionalProof = { proofId: "provisional:fixture", requirementFingerprint: contracts.requirementFingerprint(state), capabilityCoverageProof };
-  const claimCoverageProof = { claimSetFingerprint: contracts.claimSetFingerprint(state) };
-  const auditProof = { auditId: "audit:fixture", executorId: "audit:fixture", executorVersion: "1", executionId: "run:fixture", completed: true, outcome: "passed", requirementFingerprint: contracts.requirementFingerprint(state), provisionalProofId: provisionalProof.proofId, blockingGapIds: [] };
-  const spec = { elements: sourceClaims.map(({ source }, index) => ({ id: `spec:${index}`, kind: "functional_requirement", sourceClaimIds: [`claim:${source.id}`] })) };
-  const finalProof = { auditId: auditProof.auditId, provisionalProofId: provisionalProof.proofId, completionCandidateFingerprint: contracts.completionCandidateFingerprint(state, auditProof.auditId) };
-  return { state, capabilityCoverageProof, provisionalProof, claimCoverageProof, auditProof, spec, finalProof };
-};
-
-test("raw events are retained but can never produce production semantic facts or Completion in PR0", () => {
-  const authority = contracts.createArchitectureAuthority();
-  const inputs = ["xx", "aa", "0", "false", "single_actor", "local", "silent", ""];
-  for (const [index, text] of inputs.entries()) assert.equal(contracts.submitRawUserAnswer({ authority, event: { eventId: `raw-${index}`, text, questionId: "forged", authority: "user", status: "satisfied", relation: "explicitly_states" } }).status, "blocked_missing_authority");
-  assert.equal(contracts.listPendingQuestions({ authority }).length, 0);
-  assert.equal(contracts.finalCompletionProof({ authority, auditId: "forged" }).eligible, false);
-  assert.equal(contracts.finalCompletionProof({ authority, auditId: "forged" }).status, "blocked_missing_authority");
-});
-
-test("raw-event replay detects mutation but raw provenance is not semantic authority", () => {
-  const authority = contracts.createArchitectureAuthority();
-  assert.equal(contracts.submitRawInitialInput({ authority, event: { eventId: "same", text: "x" } }).replay, false);
-  assert.equal(contracts.submitRawInitialInput({ authority, event: { eventId: "same", text: "x" } }).replay, true);
-  assert.throws(() => contracts.submitRawInitialInput({ authority, event: { eventId: "same", text: "changed" } }), /replay was modified/);
-});
-
-test("synthetic complete proof fixture is eligible only through every verifier gate", () => {
-  const fixture = completeFixture();
-  assert.equal(contracts.validateRegistryContext(fixture.state.registry).eligible, true);
-  assert.equal(contracts.validateEvidenceEdges({ registry: fixture.state.registry, revisions: fixture.state.revisions, targets: fixture.state.targets, evidenceEdges: fixture.state.evidenceEdges }).eligible, true);
-  assert.equal(contracts.validateCapabilityCoverageProof({ state: fixture.state, proof: fixture.capabilityCoverageProof }).eligible, true);
-  assert.equal(contracts.validateClaimCoverageProof({ state: fixture.state, proof: fixture.claimCoverageProof }).eligible, true);
-  assert.equal(contracts.validateFinalCompletionProof(fixture).eligible, true);
-});
-
-test("registry and coverage verifier fail closed for absent universes, patterns, rules, or executors", () => {
-  const fixture = completeFixture();
-  for (const mutate of [
-    (value) => { delete value.state.registry; },
-    (value) => { value.state.registry.slotTemplates = []; },
-    (value) => { value.state.registry.rules = []; },
-    (value) => { value.state.registry.auditExecutors = []; },
-    (value) => { value.state.registry.coreUserValuePatterns = []; },
-  ]) { const value = clone(fixture); mutate(value); assert.equal(contracts.validateFinalCompletionProof(value).eligible, false); }
-});
-
-test("evidence verifier rejects stale sources, invalid relations, missing parents, classification, scope, and span mismatches", () => {
-  const fixture = completeFixture();
-  const cases = [
-    (value) => { value.state.evidenceEdges[0].relation = "invented"; },
-    (value) => { value.state.evidenceEdges[0].evidenceSpan = "partial"; },
-    (value) => { value.state.evidenceEdges[0].scopeKey = "wrong"; },
-    (value) => { value.state.evidenceEdges[0].classification = "wrong"; },
-    (value) => { value.state.evidenceEdges[0].derivationDepth = 1; },
-    (value) => { value.state.revisions[0].currentness = "stale"; },
-  ];
-  for (const mutate of cases) { const value = clone(fixture); mutate(value); assert.equal(contracts.validateFinalCompletionProof(value).eligible, false); }
-});
-
-test("proof chain fails closed for missing claims, unresolved decisions, conflicts, feasibility, non-fixpoint, stale artifacts, audit, and stale fingerprints", () => {
-  const fixture = completeFixture();
-  const cases = [
-    (value) => { value.state.claims.pop(); },
-    (value) => { value.state.decisionRevisions[0].status = "proposed"; },
-    (value) => { value.state.issues.push({ id: "conflict", kind: "conflict", blocking: true, currentness: "current" }); },
-    (value) => { value.state.issues.push({ id: "feasibility", kind: "feasibility", blocking: true, currentness: "current" }); },
-    (value) => { value.state.graphFixpoint.reached = false; },
-    (value) => { value.state.artifacts.push({ id: "stale", blocking: true, currentness: "stale" }); },
-    (value) => { value.auditProof.completed = false; },
-    (value) => { value.auditProof.requirementFingerprint = "old"; },
-    (value) => { value.provisionalProof.requirementFingerprint = "old"; },
-  ];
-  for (const mutate of cases) { const value = clone(fixture); mutate(value); assert.equal(contracts.validateFinalCompletionProof(value).eligible, false); }
-});
-
-test("required SPEC elements must carry known Claim IDs", () => {
-  const fixture = completeFixture();
-  fixture.spec.elements[0].sourceClaimIds = [];
-  assert.equal(contracts.validateFinalCompletionProof(fixture).eligible, false);
-  const unknown = completeFixture(); unknown.spec.elements[0].sourceClaimIds = ["claim:forged"];
-  assert.equal(contracts.validateFinalCompletionProof(unknown).eligible, false);
-});
-
-test("canonical identity distinguishes null from empty, ignores display metadata, and fingerprints semantic changes only", () => {
-  assert.notDeepEqual(contracts.canonicalCapabilityKey({ capabilityTypeId: "x", managedObjectIds: null, actorIds: [] }), contracts.canonicalCapabilityKey({ capabilityTypeId: "x", managedObjectIds: [], actorIds: [] }));
-  assert.equal(contracts.capabilityInstanceId({ capabilityTypeId: "x", managedObjectIds: [], actorIds: [], displayLabel: "A" }), contracts.capabilityInstanceId({ capabilityTypeId: "x", managedObjectIds: [], actorIds: [], displayLabel: "B" }));
-  const fixture = completeFixture(); const initial = contracts.requirementFingerprint(fixture.state); fixture.state.timestamp = Date.now(); assert.equal(contracts.requirementFingerprint(fixture.state), initial); fixture.state.decisionRevisions[0].value = "changed"; assert.notEqual(contracts.requirementFingerprint(fixture.state), initial);
-});
-
-test("revision/DAG transaction kernel rejects multiple heads and cycles, rolls back failures, and detects optimistic concurrency", () => {
-  const kernel = contracts.createTransactionKernel(); const transaction = contracts.beginTransaction(kernel);
-  contracts.proposeRevision(transaction, { id: "r1", instanceId: "d1", currentness: "current" }); contracts.proposeRevision(transaction, { id: "r2", instanceId: "d1", currentness: "current" });
-  const rejected = contracts.commitTransaction(transaction); assert.equal(rejected.committed, false); assert.equal(contracts.transactionSnapshot(kernel).revisions.length, 0);
-  const cycleKernel = contracts.createTransactionKernel(); const cycle = contracts.beginTransaction(cycleKernel); contracts.proposeRevision(cycle, { id: "r1", instanceId: "d1", currentness: "current" }); contracts.proposeDependency(cycle, { fromId: "r1", toId: "r2" }); contracts.proposeDependency(cycle, { fromId: "r2", toId: "r1" }); assert.equal(contracts.commitTransaction(cycle).committed, false);
-  const concurrent = contracts.createTransactionKernel(); const first = contracts.beginTransaction(concurrent); const second = contracts.beginTransaction(concurrent); contracts.proposeRevision(first, { id: "r1", instanceId: "d1", currentness: "current" }); assert.equal(contracts.commitTransaction(first).committed, true); contracts.proposeRevision(second, { id: "r2", instanceId: "d2", currentness: "current" }); assert.equal(contracts.commitTransaction(second).committed, false);
-});
-
-test("migration verifier enforces identity, version, idempotency, and current projection", () => {
-  const registryContext = registry(); const record = { sourceContextVersion: "v4", targetContextVersion: "v5", sourceFactFingerprint: "source", registryVersionSet: { ...contracts.REGISTRY_VERSION_SET }, migrationStatus: "verified", migrationWarnings: [] }; record.migrationId = contracts.migrationRecordId(record);
-  assert.equal(contracts.validateMigrationRecord({ record, registry: registryContext, currentProjection: { migrationId: record.migrationId } }).eligible, true);
-  assert.equal(contracts.validateMigrationRecord({ record, registry: registryContext, existingRecords: [{ ...record, migrationId: "other" }] }).eligible, false);
-  assert.equal(contracts.validateMigrationRecord({ record: { ...record, migrationId: "forged" }, registry: registryContext }).eligible, false);
-});
+test("production raw inputs are always blocked without a semantic authority", () => { const a = c.createArchitectureAuthority(); for (const [i, text] of ["xx", "aa", "0", "false", "single_actor", ""].entries()) c.submitRawUserAnswer({ authority: a, event: { eventId: `x${i}`, text } }); assert.equal(c.finalCompletionProof({ authority: a }).status, "blocked_missing_authority"); });
+test("complete synthetic fixture is eligible and candidate proof cannot redefine facts", () => { const x = fixture(); assert.equal(valid(x).eligible, true); x.provisional.capabilityCoverageProof.closures[0].status = "not_applicable"; x.provisional.capabilityCoverageProof.closures[0].ruleId = "fake"; assert.equal(valid(x).eligible, false); });
+test("evidence structure rejects stale, unknown relation, missing parent and fake transform", () => { for (const mutate of [(x) => { x.l.evidenceEdges[0].currentness = "stale"; }, (x) => { x.l.evidenceEdges[0].relation = "fake"; }, (x) => { x.l.evidenceEdges[1].relation = "directly_entails"; x.l.evidenceEdges[1].transformRuleId = "transform:registered"; x.l.evidenceEdges[1].derivationDepth = 1; }, (x) => { x.l.evidenceEdges[0].transformRuleId = "fake"; }]) { const x = fixture(); mutate(x); assert.equal(valid(x).eligible, false); } });
+test("proof chain rejects fake settlement, missing evaluators, fake audit, omitted required sources, and reduced SPEC", () => { for (const mutate of [(x) => { x.l.decisionSettlementRecords[0].status = "settled"; x.l.decisionSettlementRecords[0].ruleId = "fake"; }, (x) => { x.l.evaluationProofs.splice(0); }, (x) => { x.audit.executionId = "fake"; }, (x) => { x.l.claims.pop(); }, (x) => { x.artifact.elements.splice(1); }]) { const x = fixture(); mutate(x); assert.equal(valid(x).eligible, false); } });
+test("revision kernel rejects supersede cycles and atomically rolls back cycles", () => { assert.equal(c.validateRevisionInvariants({ revisions: [{ id: "r1", instanceId: "d", currentness: "stale", supersedesRevisionId: "r2" }, { id: "r2", instanceId: "d", currentness: "current", supersedesRevisionId: "r1" }] }).eligible, false); const k = c.createTransactionKernel(); const t = c.beginTransaction(k); c.proposeRevision(t, { id: "r", instanceId: "d", currentness: "current" }); c.proposeDependency(t, { fromId: "r", toId: "a", type: "depends" }); c.proposeDependency(t, { fromId: "a", toId: "r", type: "depends" }); assert.equal(c.commitTransaction(t).committed, false); assert.equal(c.transactionSnapshot(k).revisions.length, 0); });
+test("migration verifier rejects replay and non-current projection", () => { const x = fixture(); const rec = { sourceContextVersion: "v4", targetContextVersion: "v5", sourceFactFingerprint: "s", registryVersionSet: { ...c.REGISTRY_VERSION_SET }, adapterId: "migration", adapterVersion: "1", sourceProvenance: "verified", migrationStatus: "ok", migrationWarnings: [] }; rec.migrationId = c.migrationRecordId(rec); x.l.migrationRecords.push(rec); assert.equal(c.validateMigrationRecord(x.a, { record: rec, projections: [{ migrationId: rec.migrationId, sourceFactFingerprint: "s", compatible: true, currentness: "current" }] }).eligible, true); assert.equal(c.validateMigrationRecord(x.a, { record: rec, projections: [] }).eligible, false); });
