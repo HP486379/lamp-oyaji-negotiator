@@ -1,21 +1,142 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULT_SLOT_REGISTRY, REGISTRY_VERSION_SET, UNIVERSAL_SLOT_TEMPLATES, auditTerminalState, capabilityCoverageProof, capabilityInstanceId, canonicalCapabilityKey, claimCoverageProof, claimSetFingerprint, createArchitectureAuthority, currentMigrationProjection, decisionInstanceId, migrateV4Context, propagateStaleTransaction, requirementFingerprint, resolveCriticality, slotRegistryCoverageProof, validateArtifactDag, validateEvidenceEdge, validateSpecClaimConformance } from "../src/requirements-v5/contracts.js";
+import {
+  REGISTRY_VERSION_SET,
+  UNIVERSAL_SLOT_TEMPLATES,
+  capabilityInstanceId,
+  canonicalCapabilityKey,
+  claimCoverageProof,
+  claimSetFingerprint,
+  createArchitectureAuthority,
+  currentMigrationProjection,
+  decisionInstanceId,
+  executeAuthorityCommand,
+  finalCompletionProof,
+  migrateV4Context,
+  propagateStaleTransaction,
+  requirementFingerprint,
+  resolveCriticality,
+  slotRegistryCoverageProof,
+  validateEvidenceEdge,
+  validateSpecClaimConformance,
+} from "../src/requirements-v5/contracts.js";
 
-const rule={relation:"directly_entails",sourceKind:"answer",targetKind:"requirement",maxDerivationDepth:1,allowedSourceClassifications:["product_requirement"],allowedTargetClassifications:["product_requirement"]};
-const evidence=()=>createArchitectureAuthority({registries:{relationRules:[rule],entailmentRules:[{entailmentRuleId:"r",sourceKind:"answer",targetKind:"requirement",sourceValueSchemaId:"enum",targetValueSchemaId:"enum",maxDerivationDepth:1}]},revisions:[{revisionId:"r1",currentness:"current",kind:"answer",classification:"product_requirement",scopeKey:"s",evidenceText:"A",valueSchemaId:"enum"}],targets:[{id:"t",currentness:"current",kind:"requirement",classification:"product_requirement",scopeKey:"s",valueSchemaId:"enum"}],evidenceEdges:[{edgeId:"e",currentness:"current",sourceRevisionId:"r1",targetId:"t",relation:"directly_entails",targetScopeKey:"s",evidenceSpan:"A",derivationDepth:1,entailmentRuleId:"r"}]});
-const registry=()=>({registryVersion:REGISTRY_VERSION_SET.slotTemplate,semanticRegistryVersion:REGISTRY_VERSION_SET.coreUserValuePattern,slotTemplates:[...UNIVERSAL_SLOT_TEMPLATES.map(slotTemplateId=>({slotTemplateId,slotClass:"universal",registryVersion:REGISTRY_VERSION_SET.slotTemplate})),{slotTemplateId:"recipe",slotClass:"core_value_pattern",registryVersion:REGISTRY_VERSION_SET.slotTemplate}],coreUserValuePatterns:[{coreUserValuePatternId:"recipe",registryVersion:REGISTRY_VERSION_SET.coreUserValuePattern,requiredSlotTemplateIds:["recipe"]}]});
+const setupGroundedAuthority = () => {
+  const a = createArchitectureAuthority({ registries: { fake: true } });
+  executeAuthorityCommand(a, { type: "set_core_user_value", revisionId: "cuv1", value: "interactive value" });
+  executeAuthorityCommand(a, { type: "map_core_user_value", status: "mapped", patternIds: ["pr0_interactive_value"] });
+  executeAuthorityCommand(a, { type: "add_revision", revisionId: "parent", value: "root", authority: "user", confirmation: "explicitly_confirmed", classification: "product_requirement", kind: "answer", scopeKey: "s", evidenceText: "root", valueSchemaId: "enum" });
+  executeAuthorityCommand(a, { type: "add_target", id: "parent-target", kind: "requirement", classification: "product_requirement", scopeKey: "s", valueSchemaId: "enum" });
+  executeAuthorityCommand(a, { type: "add_evidence", edgeId: "parent-e", sourceRevisionId: "parent", targetId: "parent-target", relation: "explicitly_states", targetScopeKey: "s", evidenceSpan: "root", derivationDepth: 0 });
+  executeAuthorityCommand(a, { type: "add_revision", revisionId: "r1", value: "A", authority: "user", confirmation: "explicitly_confirmed", classification: "product_requirement", kind: "answer", scopeKey: "s", evidenceText: "A", valueSchemaId: "enum", criticalityRuleId: "core-impact", effects: { coreCapability: true }, settlement: "settled" });
+  executeAuthorityCommand(a, { type: "add_target", id: "t1", kind: "requirement", classification: "product_requirement", scopeKey: "s", valueSchemaId: "enum" });
+  executeAuthorityCommand(a, { type: "add_evidence", edgeId: "e1", sourceRevisionId: "r1", targetId: "t1", relation: "directly_entails", targetScopeKey: "s", evidenceSpan: "A", derivationDepth: 1, parentEdgeId: "parent-e", entailmentRuleId: "pr0_enum_identity", transformId: "identity" });
+  return a;
+};
 
-test("identity distinguishes null and empty collections",()=>{const a=canonicalCapabilityKey({capabilityTypeId:"c",managedObjectIds:null,actorIds:[],parentCapabilityInstanceId:null,phaseKindId:null}),b=canonicalCapabilityKey({capabilityTypeId:"c",managedObjectIds:[],actorIds:[],parentCapabilityInstanceId:null,phaseKindId:null});assert.notDeepEqual(a,b);assert.equal(capabilityInstanceId({...a,label:"x"}),capabilityInstanceId({...a,label:"y"}));assert.notEqual(decisionInstanceId({decisionTypeId:"d",capabilityInstanceId:"c",managedObjectIds:null,actorIds:[],phaseKindId:null},{globalScopeAllowed:true}),decisionInstanceId({decisionTypeId:"d",capabilityInstanceId:"c",managedObjectIds:[],actorIds:[],phaseKindId:null},{globalScopeAllowed:true}));});
+const settleAllSlots = (a) => {
+  for (const slotTemplateId of [...UNIVERSAL_SLOT_TEMPLATES, "pattern_primary_capability"]) executeAuthorityCommand(a, { type: "settle_slot", slotTemplateId, status: "satisfied", evidenceEdgeId: "e1" });
+};
 
-test("evidence registry and ledgers reject caller-forged relation, scope, span, classification and conflict",()=>{const a=evidence();assert.equal(validateEvidenceEdge({authority:a,edgeId:"e"}).accepted,true);a.ledgers.evidenceEdges.get("e").relation="fake";assert.equal(validateEvidenceEdge({authority:a,edgeId:"e"}).accepted,false);a.ledgers.evidenceEdges.get("e").relation="directly_entails";a.ledgers.evidenceEdges.get("e").targetScopeKey="fake";assert.equal(validateEvidenceEdge({authority:a,edgeId:"e"}).accepted,false);a.ledgers.evidenceEdges.get("e").targetScopeKey="s";a.ledgers.evidenceEdges.get("e").evidenceSpan="";assert.equal(validateEvidenceEdge({authority:a,edgeId:"e"}).accepted,false);a.ledgers.evidenceEdges.get("e").evidenceSpan="A";a.ledgers.revisions.get("r1").classification="implementation_proposal";assert.equal(validateEvidenceEdge({authority:a,edgeId:"e",explicitStructuredAnswer:true}).accepted,false);});
+const setupCompletable = () => {
+  const a = setupGroundedAuthority();
+  settleAllSlots(a);
+  executeAuthorityCommand(a, { type: "add_capability", id: "cap1", capabilityTypeId: "generic", managedObjectIds: [], actorIds: [], scopeKey: "s", blocking: true, provisional: false });
+  executeAuthorityCommand(a, { type: "add_decision", id: "d1", revisionId: "r1" });
+  executeAuthorityCommand(a, { type: "add_core_invariant", id: "inv1", scopeKey: "s", evidenceEdgeIds: ["e1"] });
+  executeAuthorityCommand(a, { type: "add_primary_flow", id: "flow1", scopeKey: "s", evidenceEdgeIds: ["e1"] });
+  for (const sourceId of ["cap1", "d1", "inv1", "flow1"]) executeAuthorityCommand(a, { type: "add_claim", claimId: `claim-${sourceId}`, claimTypeId: "required_product", sourceId, scopeKey: "s", evidenceEdgeId: "e1" });
+  const fp = requirementFingerprint({ authority: a });
+  executeAuthorityCommand(a, { type: "add_audit", auditId: "audit1", executorId: "coverage-audit-v1", auditRuleId: "final-coverage-v1", requirementFingerprint: fp, executed: true, completed: true, outcome: "passed", attempts: 1, maxAttempts: 1 });
+  return a;
+};
 
-test("slot registry and actual slot ledger fail closed for empty, forged, unknown and missing slots",()=>{const a=createArchitectureAuthority({registries:{slotRegistry:registry()},coreUserValueMapping:{status:"mapped",patternIds:["recipe"]}});assert.equal(slotRegistryCoverageProof({authority:a}).complete,true);assert.equal(capabilityCoverageProof({authority:a,requirementFingerprint:"fp",complete:true}).complete,false);a.ledgers.coreUserValueMapping={status:"mapped",patternIds:[]};assert.equal(slotRegistryCoverageProof({authority:a}).complete,false);a.ledgers.coreUserValueMapping={status:"mapped",patternIds:["fake"]};assert.equal(slotRegistryCoverageProof({authority:a}).complete,false);a.ledgers.coreUserValueMapping={status:"mapped",patternIds:["recipe"]};a.registries.slotRegistry.semanticRegistryVersion="fake";assert.equal(slotRegistryCoverageProof({authority:a}).complete,false);assert.equal(slotRegistryCoverageProof({authority:createArchitectureAuthority({registries:{slotRegistry:DEFAULT_SLOT_REGISTRY}})}).complete,false);});
+test("authority is opaque and ignores caller-supplied registries/ledgers", () => {
+  const a = createArchitectureAuthority({ registries: { criticalityRules: [{ ruleId: "evil" }] }, claims: [{ claimId: "evil" }], audits: [{ auditId: "evil", outcome: "passed" }] });
+  assert.equal(Object.isFrozen(a), true);
+  assert.equal(a.registries, undefined);
+  assert.throws(() => executeAuthorityCommand(a, { type: "map_core_user_value", status: "mapped", patternIds: ["evil"] }));
+});
 
-test("claim coverage enumerates sources from ledgers and requires current validated evidence",()=>{const a=evidence();a.registries.claimTypes=[{claimTypeId:"required",required:true,sourceKinds:["capability","decision","core_invariant","primary_flow"]}];a.ledgers.capabilities.set("cap",{id:"cap",currentness:"current",blocking:true,scopeKey:"s"});a.ledgers.coreInvariants.set("inv",{id:"inv",currentness:"current",scopeKey:"s"});a.ledgers.primaryFlows.set("flow",{id:"flow",currentness:"current",scopeKey:"s"});a.ledgers.revisions.set("dec",{revisionId:"dec",currentness:"current",classification:"product_requirement",settlement:"settled",scopeKey:"s"});for(const id of ["cap","inv","flow","dec"])a.ledgers.claims.set(`c-${id}`,{claimId:`c-${id}`,claimTypeId:"required",sourceIds:[id],scopeKey:"s",currentness:"current",evidenceEdgeIds:["e"]});assert.equal(claimCoverageProof({authority:a,claimSetFingerprint:"f"}).complete,true);a.ledgers.claims.delete("c-cap");assert.equal(claimCoverageProof({authority:a,claimSetFingerprint:"f",sources:[]}).complete,false);a.ledgers.claims.set("c-cap",{claimId:"c-cap",claimTypeId:"required",sourceIds:["cap"],scopeKey:"s",currentness:"current",evidenceEdgeIds:["fake"]});assert.equal(claimCoverageProof({authority:a,claimSetFingerprint:"f"}).complete,false);});
+test("canonical identity distinguishes null and empty arrays", () => {
+  const a = canonicalCapabilityKey({ capabilityTypeId: "c", managedObjectIds: null, actorIds: [], parentCapabilityInstanceId: null, phaseKindId: null });
+  const b = canonicalCapabilityKey({ capabilityTypeId: "c", managedObjectIds: [], actorIds: [], parentCapabilityInstanceId: null, phaseKindId: null });
+  assert.notDeepEqual(a, b);
+  assert.notEqual(capabilityInstanceId({ capabilityTypeId: "c", managedObjectIds: null, actorIds: [], parentCapabilityInstanceId: null, phaseKindId: null }), capabilityInstanceId({ capabilityTypeId: "c", managedObjectIds: [], actorIds: [], parentCapabilityInstanceId: null, phaseKindId: null }));
+  assert.notEqual(decisionInstanceId({ decisionTypeId: "d", capabilityInstanceId: "c", managedObjectIds: null, actorIds: [], phaseKindId: null }, { globalScopeAllowed: true }), decisionInstanceId({ decisionTypeId: "d", capabilityInstanceId: "c", managedObjectIds: [], actorIds: [], phaseKindId: null }, { globalScopeAllowed: true }));
+});
 
-test("audit requires a current successful matching audit and never trusts an absent/unknown result",()=>{const a=createArchitectureAuthority();assert.notEqual(auditTerminalState({authority:a,auditId:"x",requirementFingerprint:"fp"}).state,"passed");a.ledgers.audits.set("x",{auditId:"x",currentness:"current",requirementFingerprint:"fp",attempts:1,maxAttempts:2,outcome:"passed",errorKind:"unknown",rejectedGapFingerprints:[]});assert.notEqual(auditTerminalState({authority:a,auditId:"x",requirementFingerprint:"fp"}).state,"passed");a.ledgers.audits.set("x",{auditId:"x",currentness:"current",requirementFingerprint:"fp",attempts:1,maxAttempts:2,outcome:"passed",proposedGapFingerprint:"g",rejectedGapFingerprints:["g"]});assert.notEqual(auditTerminalState({authority:a,auditId:"x",requirementFingerprint:"fp"}).state,"passed");a.ledgers.audits.set("x",{auditId:"x",currentness:"current",requirementFingerprint:"fp",attempts:1,maxAttempts:2,outcome:"passed",rejectedGapFingerprints:[]});assert.equal(auditTerminalState({authority:a,auditId:"x",requirementFingerprint:"fp"}).state,"passed");});
+test("evidence is validated at registration and parent/transform/schema cannot be forged", () => {
+  const a = createArchitectureAuthority();
+  executeAuthorityCommand(a, { type: "add_revision", revisionId: "r", value: "A", authority: "user", confirmation: "explicitly_confirmed", classification: "product_requirement", kind: "answer", scopeKey: "s", evidenceText: "A", valueSchemaId: "enum" });
+  executeAuthorityCommand(a, { type: "add_target", id: "t", kind: "requirement", classification: "product_requirement", scopeKey: "s", valueSchemaId: "enum" });
+  assert.throws(() => executeAuthorityCommand(a, { type: "add_evidence", edgeId: "e", sourceRevisionId: "r", targetId: "t", relation: "directly_entails", targetScopeKey: "s", evidenceSpan: "A", derivationDepth: 1, entailmentRuleId: "pr0_enum_identity", transformId: "identity" }), /parent_required/);
+  assert.throws(() => executeAuthorityCommand(a, { type: "add_evidence", edgeId: "e2", sourceRevisionId: "r", targetId: "t", relation: "fake", targetScopeKey: "s", evidenceSpan: "A", derivationDepth: 0 }), /unregistered_relation/);
+});
 
-test("fingerprints omit timestamps but retain semantic claim changes",()=>{const s={coreUserValue:{revisionId:"r",value:"v",currentness:"current",createdAt:"a"},actors:[],managedObjects:[],activeCapabilities:[],traitHeads:[],decisionRevisions:[],openBlockingIssues:[],registryVersions:REGISTRY_VERSION_SET},fp=requirementFingerprint(s);assert.equal(fp,requirementFingerprint({...s,coreUserValue:{...s.coreUserValue,createdAt:"b"}}));assert.notEqual(claimSetFingerprint({requirementFingerprint:fp,claims:[{claimId:"c",scopeKey:"a",sourceIds:[],evidenceEdgeIds:[]}],claimTypeRegistryVersion:"v"}),claimSetFingerprint({requirementFingerprint:fp,claims:[{claimId:"c",scopeKey:"b",sourceIds:[],evidenceEdgeIds:[]}],claimTypeRegistryVersion:"v"}));});
+test("slots cannot be forged satisfied and slot registry closes mother set", () => {
+  const a = setupGroundedAuthority();
+  assert.equal(slotRegistryCoverageProof({ authority: a }).complete, true);
+  assert.throws(() => executeAuthorityCommand(a, { type: "settle_slot", slotTemplateId: "required_input", status: "satisfied" }), /requires evidence/);
+  assert.throws(() => executeAuthorityCommand(a, { type: "settle_slot", slotTemplateId: "fake", status: "explicitly_not_required", ruleId: "explicit_not_required" }), /unknown slot/);
+});
 
-test("criticality, stale transaction, migration currentness and SPEC provenance are authoritative",()=>{const a=createArchitectureAuthority({revisions:[{revisionId:"d",criticalityRuleId:"fake"}],artifacts:[{id:"r",kind:"revision",currentness:"current"},{id:"c",kind:"claim",currentness:"current"}],dependencyEdges:[{fromArtifactKind:"revision",fromArtifactId:"r",toArtifactKind:"claim",toArtifactId:"c",dependencyKind:"grounding"}]});assert.equal(resolveCriticality({authority:a,decisionInstanceId:"d",requirementFingerprint:"f"}).blocking,false);a.registries.criticalityRules=[{ruleId:"real",evaluate:()=>true}];a.ledgers.revisions.get("d").criticalityRuleId="real";assert.equal(resolveCriticality({authority:a,decisionInstanceId:"d",requirementFingerprint:"f"}).blocking,true);assert.throws(()=>propagateStaleTransaction({authority:a,changedArtifactId:"revision:r",reevaluate:()=>false}));assert.equal(a.ledgers.artifacts.get("revision:r").currentness,"current");assert.deepEqual(propagateStaleTransaction({authority:a,changedArtifactId:"revision:r"}),["claim:c","revision:r"]);const src={facts:[{key:"u",source:"user_confirmed",revisionId:"u",value:"x"}]},one=migrateV4Context({authority:a,source:src,registryVersionSet:REGISTRY_VERSION_SET}),two=migrateV4Context({authority:a,source:src,registryVersionSet:{...REGISTRY_VERSION_SET,trait:"new"}});assert.equal(a.ledgers.migrations.get(one.record.migrationId).migrationStatus,"superseded");assert.equal(currentMigrationProjection({authority:a,sourceFactFingerprint:two.record.sourceFactFingerprint}).userConfirmedRevisions[0].revisionId,"u");a.ledgers.claims.set("claim",{claimId:"claim",currentness:"current"});assert.equal(validateSpecClaimConformance({authority:a,specElements:[{id:"fr",kind:"functional_requirement",sourceClaimIds:[]}] }).complete,false);assert.equal(validateSpecClaimConformance({authority:a,specElements:[{id:"fr",kind:"functional_requirement",sourceClaimIds:["claim"]}] }).complete,true);assert.throws(()=>validateArtifactDag([{fromArtifactKind:"a",fromArtifactId:"1",toArtifactKind:"a",toArtifactId:"1",dependencyKind:"bad"}]));});
+test("claim coverage is ledger-derived and missing blocking source fails closed", () => {
+  const a = setupGroundedAuthority(); settleAllSlots(a);
+  executeAuthorityCommand(a, { type: "add_capability", id: "cap1", capabilityTypeId: "generic", managedObjectIds: [], actorIds: [], scopeKey: "s", blocking: true, provisional: false });
+  assert.equal(claimCoverageProof({ authority: a }).complete, false);
+  executeAuthorityCommand(a, { type: "add_claim", claimId: "claim-cap1", claimTypeId: "required_product", sourceId: "cap1", scopeKey: "s", evidenceEdgeId: "e1" });
+  assert.equal(claimCoverageProof({ authority: a }).complete, true);
+  assert.throws(() => executeAuthorityCommand(a, { type: "add_claim", claimId: "evil", claimTypeId: "fake", sourceId: "cap1", scopeKey: "s", evidenceEdgeId: "e1" }));
+});
+
+test("criticality uses immutable builtin declarative rule", () => {
+  const a = setupGroundedAuthority(); executeAuthorityCommand(a, { type: "add_decision", id: "d1", revisionId: "r1" });
+  assert.equal(resolveCriticality({ authority: a, decisionInstanceId: "d1" }).blocking, true);
+  assert.equal(resolveCriticality({ authority: a, decisionInstanceId: "missing" }).blocking, false);
+});
+
+test("fingerprint is semantic and omits caller metadata while retaining scope/value", () => {
+  const a = setupGroundedAuthority(); const fp1 = requirementFingerprint({ authority: a });
+  const fp2 = requirementFingerprint({ authority: a, timestamp: "evil" });
+  assert.equal(fp1, fp2);
+  executeAuthorityCommand(a, { type: "add_actor", id: "actor1", actorTypeId: "user", scopeKey: "scope-a" });
+  assert.notEqual(requirementFingerprint({ authority: a }), fp1);
+  assert.ok(claimSetFingerprint({ authority: a }));
+});
+
+test("audit cannot be forged and final completion is a single fail-closed proof", () => {
+  const a = setupCompletable();
+  const specElements = [
+    { id: "fr", kind: "functional_requirement", sourceClaimIds: ["claim-cap1"] },
+    { id: "ac", kind: "acceptance_criteria", sourceClaimIds: ["claim-d1"] },
+    { id: "flow", kind: "primary_flow_step", sourceClaimIds: ["claim-flow1"] },
+    { id: "err", kind: "error_handling_rule", sourceClaimIds: ["claim-inv1"] },
+  ];
+  const proof = finalCompletionProof({ authority: a, auditId: "audit1", specElements });
+  assert.equal(proof.complete, true);
+  assert.equal(validateSpecClaimConformance({ authority: a, specElements }).complete, true);
+  assert.equal(finalCompletionProof({ authority: a, auditId: "missing", specElements }).complete, false);
+  assert.equal(finalCompletionProof({ authority: a, auditId: "audit1", specElements: [{ id: "fr", kind: "functional_requirement", sourceClaimIds: [] }] }).complete, false);
+  assert.throws(() => executeAuthorityCommand(a, { type: "add_audit", auditId: "evil", executorId: "fake", auditRuleId: "final-coverage-v1", requirementFingerprint: requirementFingerprint({ authority: a }), executed: true, completed: true, outcome: "passed" }));
+});
+
+test("migration requires registered authoritative adapter and keeps one current projection", () => {
+  const a = createArchitectureAuthority();
+  assert.throws(() => executeAuthorityCommand(a, { type: "register_legacy_snapshot", adapterId: "fake", sourceContextVersion: "v4", facts: [] }));
+  const snapshotId = executeAuthorityCommand(a, { type: "register_legacy_snapshot", adapterId: "v4-authoritative-export-v1", sourceContextVersion: "v4", facts: [{ key: "u", source: "user_confirmed", revisionId: "u", value: "x" }] });
+  const one = migrateV4Context({ authority: a, snapshotId });
+  const two = migrateV4Context({ authority: a, snapshotId });
+  assert.equal(two.created, false);
+  assert.equal(currentMigrationProjection({ authority: a, sourceFactFingerprint: one.record.sourceFactFingerprint }).userConfirmedRevisions[0].revisionId, "u");
+  assert.deepEqual(one.record.registryVersionSet, REGISTRY_VERSION_SET);
+});
+
+test("stale propagation is atomic", () => {
+  const a = createArchitectureAuthority();
+  executeAuthorityCommand(a, { type: "add_artifact", id: "r", kind: "revision" });
+  executeAuthorityCommand(a, { type: "add_artifact", id: "c", kind: "claim" });
+  executeAuthorityCommand(a, { type: "add_dependency", fromArtifactKind: "revision", fromArtifactId: "r", toArtifactKind: "claim", toArtifactId: "c", dependencyKind: "grounding" });
+  assert.throws(() => propagateStaleTransaction({ authority: a, changedArtifactId: "revision:r", reevaluate: () => false }));
+  assert.deepEqual(propagateStaleTransaction({ authority: a, changedArtifactId: "revision:r" }), ["claim:c", "revision:r"]);
+});
