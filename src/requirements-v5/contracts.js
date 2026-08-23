@@ -33,6 +33,18 @@ export const REGISTRY_VERSION_SET = Object.freeze({
 export const UNIVERSAL_SLOT_TEMPLATES = Object.freeze([
   "actor_participation", "primary_interaction", "required_input", "required_output", "success_observability", "state_continuity", "external_boundary", "failure_observability",
 ]);
+export const EVIDENCE_RELATION_REGISTRY = Object.freeze([
+  { relation: "explicitly_supports", sourceKind: "answer", targetKind: "requirement", maxDerivationDepth: 0, requiresParentEdge: false },
+  { relation: "explicitly_rejects", sourceKind: "answer", targetKind: "requirement", maxDerivationDepth: 0, requiresParentEdge: false },
+  { relation: "directly_entails", sourceKind: "answer", targetKind: "requirement", maxDerivationDepth: 1, requiresParentEdge: false },
+]);
+const universalSlotDefinitions = Object.freeze(UNIVERSAL_SLOT_TEMPLATES.map((slotTemplateId) => ({ slotTemplateId, slotClass: "universal", registryVersion: REGISTRY_VERSION_SET.slotTemplate })));
+export const DEFAULT_SLOT_REGISTRY = Object.freeze({
+  registryVersion: REGISTRY_VERSION_SET.slotTemplate,
+  semanticRegistryVersion: REGISTRY_VERSION_SET.coreUserValuePattern,
+  slotTemplates: universalSlotDefinitions,
+  coreUserValuePatterns: [],
+});
 
 export function createDecisionLedger() { return { revisions: new Map(), heads: new Map() }; }
 export function appendDecisionRevision(ledger, revision, { expectedCurrentRevisionId = null } = {}) {
@@ -61,24 +73,75 @@ export function appendTraitAssertion(ledger, assertion) {
   ledger.revisions.set(assertion.revisionId, { ...assertion, evidenceEdgeIds: sortedIds(assertion.evidenceEdgeIds) }); ledger.heads.set(scope, assertion.revisionId); return assertion;
 }
 
-export function validateEvidenceEdge(edge, { sourceRevision, sourceText = "", registeredEntailmentRuleIds = [], explicitStructuredAnswer = false, registeredTransformIds = [] } = {}) {
-  if (!sourceRevision || sourceRevision.currentness !== "current") return { accepted: false, reviewRequired: true, reason: "stale_or_missing_source" };
-  if (!String(sourceText).includes(edge.evidenceSpan ?? "")) return { accepted: false, reviewRequired: true, reason: "invented_span" };
+export function validateEvidenceEdge(edge, {
+  sourceRevision,
+  sourceText = "",
+  sourceKind,
+  targetKind,
+  sourceClassification,
+  targetClassification,
+  expectedTargetScopeKey,
+  relationRegistry = EVIDENCE_RELATION_REGISTRY,
+  parentEdgeIds = [],
+  excludedEvidenceConflict = false,
+  supersededEvidenceConflict = false,
+  registeredEntailmentRules = [],
+  explicitStructuredAnswer = false,
+  registeredTransforms = [],
+} = {}) {
+  const reject = (reason) => ({ accepted: false, reviewRequired: true, reason });
+  if (!sourceRevision || sourceRevision.currentness !== "current") return reject("stale_or_missing_source");
+  if (typeof edge?.evidenceSpan !== "string" || edge.evidenceSpan !== String(sourceText)) return reject("evidence_span_not_exact");
+  if (excludedEvidenceConflict || supersededEvidenceConflict) return reject("conflicting_evidence");
+  const rule = relationRegistry.find((candidate) => candidate.relation === edge.relation && candidate.sourceKind === sourceKind && candidate.targetKind === targetKind);
+  if (!rule) return reject("unregistered_relation_or_kind");
+  if (edge.targetScopeKey !== expectedTargetScopeKey) return reject("target_scope_mismatch");
+  if (rule.requiresParentEdge && (!edge.parentEdgeId || !parentEdgeIds.includes(edge.parentEdgeId))) return reject("missing_parent_edge");
+  if (edge.parentEdgeId && !parentEdgeIds.includes(edge.parentEdgeId)) return reject("unknown_parent_edge");
+  if (!Number.isInteger(edge.derivationDepth) || edge.derivationDepth < 0 || edge.derivationDepth > rule.maxDerivationDepth) return reject("derivation_depth_exceeded");
+  if (rule.allowedSourceClassifications && !rule.allowedSourceClassifications.includes(sourceClassification)) return reject("source_classification_mismatch");
+  if (rule.allowedTargetClassifications && !rule.allowedTargetClassifications.includes(targetClassification)) return reject("target_classification_mismatch");
   if (edge.relation !== "directly_entails") return { accepted: true, reviewRequired: false };
-  const registered = registeredEntailmentRuleIds.includes(edge.entailmentRuleId) || registeredTransformIds.includes(edge.transformId) || explicitStructuredAnswer === true;
-  return registered && edge.derivationDepth <= 1 ? { accepted: true, reviewRequired: false } : { accepted: false, reviewRequired: true, reason: "unregistered_entailment" };
+  const registeredEntailment = registeredEntailmentRules.some((candidate) => candidate.entailmentRuleId === edge.entailmentRuleId && candidate.sourceKind === sourceKind && candidate.targetKind === targetKind && candidate.maxDerivationDepth >= edge.derivationDepth);
+  const registeredTransform = registeredTransforms.some((candidate) => candidate.transformId === edge.transformId && candidate.sourceKind === sourceKind && candidate.targetKind === targetKind && candidate.maxDerivationDepth >= edge.derivationDepth);
+  return registeredEntailment || registeredTransform || explicitStructuredAnswer === true
+    ? { accepted: true, reviewRequired: false }
+    : reject("unregistered_entailment");
 }
 
-export function generateCapabilitySlots({ coreUserValuePatternIds = [], patternMappings = [], slotTemplates = UNIVERSAL_SLOT_TEMPLATES, aiCandidates = [] } = {}) {
-  const ids = [...new Set([...UNIVERSAL_SLOT_TEMPLATES, ...slotTemplates])];
+function inspectSlotRegistry(registry, requestedPatternIds = [], semanticRegistryVersion) {
+  const errors = [];
+  if (!registry || registry.registryVersion !== REGISTRY_VERSION_SET.slotTemplate || registry.semanticRegistryVersion !== REGISTRY_VERSION_SET.coreUserValuePattern || semanticRegistryVersion !== registry.semanticRegistryVersion) errors.push("registry_version_mismatch");
+  const templates = registry?.slotTemplates ?? [];
+  const templateById = new Map(templates.map((template) => [template.slotTemplateId, template]));
+  const missingUniversal = UNIVERSAL_SLOT_TEMPLATES.filter((id) => {
+    const template = templateById.get(id);
+    return !template || template.slotClass !== "universal" || template.registryVersion !== registry?.registryVersion;
+  });
+  if (missingUniversal.length) errors.push("missing_universal_templates");
+  const patterns = registry?.coreUserValuePatterns ?? [];
+  const patternById = new Map(patterns.map((pattern) => [pattern.coreUserValuePatternId, pattern]));
+  const unknownPatternIds = requestedPatternIds.filter((id) => !patternById.has(id));
+  if (unknownPatternIds.length) errors.push("unknown_requested_pattern");
+  const uncoveredPatternIds = patterns.filter((pattern) => pattern.registryVersion !== registry?.semanticRegistryVersion || !(pattern.requiredSlotTemplateIds ?? []).every((id) => {
+    const template = templateById.get(id);
+    return template && template.slotClass === "core_value_pattern" && template.registryVersion === registry?.registryVersion;
+  })).map((pattern) => pattern.coreUserValuePatternId);
+  if (uncoveredPatternIds.length) errors.push("uncovered_registered_pattern");
+  return { errors, templates, patternById, missingUniversal, unknownPatternIds, uncoveredPatternIds };
+}
+export function generateCapabilitySlots({ coreUserValuePatternIds = [], patternMappings = [], slotRegistry = DEFAULT_SLOT_REGISTRY, semanticRegistryVersion = REGISTRY_VERSION_SET.coreUserValuePattern, aiCandidates = [] } = {}) {
+  const inspection = inspectSlotRegistry(slotRegistry, coreUserValuePatternIds, semanticRegistryVersion);
+  const requestedPatterns = coreUserValuePatternIds.map((id) => inspection.patternById.get(id)).filter(Boolean);
+  const ids = [...new Set([...UNIVERSAL_SLOT_TEMPLATES, ...requestedPatterns.flatMap((pattern) => pattern.requiredSlotTemplateIds ?? [])])];
   return ids.map((slotTemplateId) => ({ slotInstanceId: `slot:${slotTemplateId}`, slotTemplateId, scopeKey: "global", status: "unknown", capabilityInstanceIds: [], evidenceEdgeIds: [], proofRuleId: "pr0-slot-default" , aiCandidateCount: aiCandidates.length, coreUserValuePatternIds: sortedIds(coreUserValuePatternIds), patternMappings }));
 }
-export function slotRegistryCoverageProof({ registeredUniversalSlotTemplateIds = [], coreUserValuePatternIds = [], coveredPatternIds = [], registryVersion = REGISTRY_VERSION_SET.slotTemplate } = {}) {
-  const missingUniversal = UNIVERSAL_SLOT_TEMPLATES.filter((id) => !registeredUniversalSlotTemplateIds.includes(id));
-  const uncoveredPatternIds = coreUserValuePatternIds.filter((id) => !coveredPatternIds.includes(id));
-  return { coreUserValuePatternIds: sortedIds(coreUserValuePatternIds), universalSlotTemplateIds: sortedIds(registeredUniversalSlotTemplateIds), coveredPatternIds: sortedIds(coveredPatternIds), uncoveredPatternIds, registryVersion, complete: missingUniversal.length === 0 && uncoveredPatternIds.length === 0 };
+export function slotRegistryCoverageProof({ slotRegistry = DEFAULT_SLOT_REGISTRY, coreUserValuePatternIds = [], semanticRegistryVersion = REGISTRY_VERSION_SET.coreUserValuePattern } = {}) {
+  const inspection = inspectSlotRegistry(slotRegistry, coreUserValuePatternIds, semanticRegistryVersion);
+  return { coreUserValuePatternIds: sortedIds(coreUserValuePatternIds), universalSlotTemplateIds: sortedIds((slotRegistry?.slotTemplates ?? []).filter((template) => template.slotClass === "universal").map((template) => template.slotTemplateId)), coveredPatternIds: sortedIds((slotRegistry?.coreUserValuePatterns ?? []).filter((pattern) => !inspection.uncoveredPatternIds.includes(pattern.coreUserValuePatternId)).map((pattern) => pattern.coreUserValuePatternId)), uncoveredPatternIds: sortedIds([...inspection.unknownPatternIds, ...inspection.uncoveredPatternIds]), registryVersion: slotRegistry?.registryVersion ?? null, semanticRegistryVersion: slotRegistry?.semanticRegistryVersion ?? null, errors: inspection.errors, complete: inspection.errors.length === 0 };
 }
-export function capabilityCoverageProof({ requirementFingerprint, registryCoverage, patternState, slots = [], provisionalCapabilities = [] }) {
+export function capabilityCoverageProof({ requirementFingerprint, slotRegistry, coreUserValuePatternIds = [], semanticRegistryVersion = REGISTRY_VERSION_SET.coreUserValuePattern, patternState, slots = [], provisionalCapabilities = [] }) {
+  const registryCoverage = slotRegistryCoverageProof({ slotRegistry, coreUserValuePatternIds, semanticRegistryVersion });
   const unknownBlockingSlotIds = slots.filter((slot) => slot.status === "unknown" || (slot.conditional === true && slot.status === "not_applicable" && !slot.notApplicableRuleId)).map((slot) => slot.slotInstanceId);
   const provisionalBlockingCapabilityIds = provisionalCapabilities.filter((item) => item.blocking).map((item) => item.id);
   return { requirementFingerprint, registryVersion: REGISTRY_VERSION_SET.slotTemplate, slotGeneratorVersion: "v5-pr0.1", slotRegistryCoverageProofId: hash(registryCoverage), slotInstanceIds: slots.map((slot) => slot.slotInstanceId), unknownBlockingSlotIds, provisionalBlockingCapabilityIds, complete: registryCoverage.complete && ["mapped", "user_confirmed"].includes(patternState) && !unknownBlockingSlotIds.length && !provisionalBlockingCapabilityIds.length };
@@ -122,16 +185,29 @@ export function propagateStaleTransaction({ edges, changedArtifactId, fail = fal
   const stale = new Set([changedArtifactId]); const queue = [changedArtifactId]; while (queue.length) for (const next of downstream.get(queue.shift()) ?? []) if (!stale.has(next)) { stale.add(next); queue.push(next); } return [...stale].sort();
 }
 
-export function claimCoverageProof({ claimSetFingerprint: fp, sources = [], claims = [] }) {
-  const entries = sources.map((source) => { const representedByClaimIds = claims.filter((claim) => claim.sourceIds?.includes(source.id) && claim.currentness !== "stale").map((claim) => claim.claimId); return { sourceKind: source.kind, sourceId: source.id, representedByClaimIds, explicitlyNoClaimReason: source.noClaimReason ?? null, stale: source.currentness === "stale" }; });
-  const uncoveredBlockingSourceIds = entries.filter((entry) => !entry.stale && !entry.representedByClaimIds.length && !entry.explicitlyNoClaimReason).map((entry) => entry.sourceId);
-  const invalidNoClaimReasonIds = entries.filter((entry) => entry.explicitlyNoClaimReason && entry.explicitlyNoClaimReason !== "registered_non_required_rule").map((entry) => entry.sourceId);
-  const staleClaim = claims.some((claim) => claim.currentness === "stale");
-  return { claimSetFingerprint: fp, entries, uncoveredBlockingSourceIds, invalidNoClaimReasonIds, complete: !uncoveredBlockingSourceIds.length && !invalidNoClaimReasonIds.length && !staleClaim };
+export function claimCoverageProof({ claimSetFingerprint: fp, sources = [], claims = [], claimTypeRegistry = [], noClaimRuleRegistry = [], currentEvidenceEdgeIds = [] }) {
+  const evidenceIds = new Set(currentEvidenceEdgeIds);
+  const supportedKinds = new Set(["capability", "decision", "core_invariant", "primary_flow"]);
+  const sourceRequiresClaim = (source) => source.currentness === "current" && ((source.kind === "capability" && source.blocking === true) || (source.kind === "decision" && source.classification === "product_requirement" && ["settled", "delegated"].includes(source.settlement)) || source.kind === "core_invariant" || source.kind === "primary_flow");
+  const entries = sources.map((source) => {
+    const requiresClaim = supportedKinds.has(source.kind) && sourceRequiresClaim(source);
+    const noClaimRule = noClaimRuleRegistry.find((rule) => rule.ruleId === source.noClaimRuleId && rule.allowsNoClaim === true && rule.sourceKinds?.includes(source.kind));
+    const matchingClaims = claims.filter((claim) => claim.sourceIds?.includes(source.id) && claim.currentness === "current" && claim.scopeKey === source.scopeKey && claimTypeRegistry.some((type) => type.claimTypeId === claim.claimTypeId && type.required === true && type.sourceKinds?.includes(source.kind)) && Array.isArray(claim.evidenceEdgeIds) && claim.evidenceEdgeIds.length > 0 && claim.evidenceEdgeIds.every((id) => evidenceIds.has(id)));
+    return { sourceKind: source.kind, sourceId: source.id, representedByClaimIds: matchingClaims.map((claim) => claim.claimId), explicitlyNoClaimReason: noClaimRule?.ruleId ?? null, stale: source.currentness !== "current", requiresClaim };
+  });
+  const uncoveredBlockingSourceIds = entries.filter((entry) => entry.requiresClaim && !entry.representedByClaimIds.length).map((entry) => entry.sourceId);
+  const invalidNoClaimReasonIds = sources.filter((source) => source.noClaimRuleId && !noClaimRuleRegistry.some((rule) => rule.ruleId === source.noClaimRuleId && rule.allowsNoClaim === true && rule.sourceKinds?.includes(source.kind))).map((source) => source.id);
+  const invalidClaimIds = claims.filter((claim) => claim.currentness !== "current" || !Array.isArray(claim.evidenceEdgeIds) || !claim.evidenceEdgeIds.length || !claim.evidenceEdgeIds.every((id) => evidenceIds.has(id)) || !claimTypeRegistry.some((type) => type.claimTypeId === claim.claimTypeId && type.required === true)).map((claim) => claim.claimId);
+  return { claimSetFingerprint: fp, entries, uncoveredBlockingSourceIds, invalidNoClaimReasonIds, invalidClaimIds, complete: !uncoveredBlockingSourceIds.length && !invalidNoClaimReasonIds.length && !invalidClaimIds.length };
 }
-export function auditTerminalState({ attempts, maxAttempts, errorKind = null, rejectedGapFingerprints = [] }) {
-  if (errorKind === "timeout" || errorKind === "malformed") return attempts >= maxAttempts ? { state: "inconclusive_limit_reached", rejectedGapFingerprints } : { state: "failed_retryable", rejectedGapFingerprints };
-  return { state: "passed", rejectedGapFingerprints: sortedIds(rejectedGapFingerprints) };
+export function auditTerminalState({ attempts, maxAttempts, errorKind = null, rejectedGapFingerprints = [], proposedGapFingerprint = null, blockingGapFound = false }) {
+  const normalizedRejected = sortedIds(rejectedGapFingerprints);
+  const retryableErrorKinds = new Set(["timeout", "malformed", "refusal", "transport", "server_error"]);
+  if (!Number.isInteger(attempts) || !Number.isInteger(maxAttempts) || attempts < 0 || maxAttempts < 1) return { state: "failed_terminal", rejectedGapFingerprints: normalizedRejected, reason: "invalid_audit_attempts" };
+  if (errorKind !== null) return { state: attempts >= maxAttempts ? "inconclusive_limit_reached" : retryableErrorKinds.has(errorKind) ? "failed_retryable" : "failed_terminal", rejectedGapFingerprints: normalizedRejected, reason: errorKind };
+  if (proposedGapFingerprint && normalizedRejected.includes(proposedGapFingerprint)) return { state: "failed_terminal", rejectedGapFingerprints: normalizedRejected, reason: "repeated_rejected_gap" };
+  if (blockingGapFound) return { state: "blocking_gap_found", rejectedGapFingerprints: normalizedRejected, reason: "blocking_gap_found" };
+  return { state: "passed", rejectedGapFingerprints: normalizedRejected };
 }
 export function migrateV4Context({ source, registryVersionSet, migrations = [] }) {
   const sourceFactFingerprint = hash(source.facts ?? []); const key = hash({ sourceFactFingerprint, target: "v5", registryVersionSet }); const existing = migrations.find((item) => item.migrationId === key);
