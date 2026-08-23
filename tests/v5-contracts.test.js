@@ -1,111 +1,90 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { UNIVERSAL_SLOT_TEMPLATES, capabilityCoverageProof, canonicalCapabilityKey, createArchitectureAuthority, executeAuthorityCommand, finalCompletionProof, migrateV4Context, provisionalCompletionProof, requirementFingerprint, trustedAdapters } from "../src/requirements-v5/contracts.js";
+import * as contracts from "../src/requirements-v5/contracts.js";
 
-const run = (authority, envelope) => executeAuthorityCommand(authority, envelope);
-const R = trustedAdapters.ruleEngine;
+const begin = (authority, id = "initial", text = "利用者が目的を達成できるアプリ") => contracts.submitRawInitialInput({ authority, event: { eventId: id, text, authority: "user", classification: "product_requirement" } });
+const answerAll = (authority) => {
+  for (const [index, question] of contracts.listPendingQuestions({ authority }).entries()) contracts.submitRawUserAnswer({ authority, event: { eventId: `answer-${index}`, questionId: question.questionId, text: `利用者が${question.slotTemplateId}を選ぶ`, relation: "directly_entails", status: "satisfied" } });
+};
+const complete = () => {
+  const authority = contracts.createArchitectureAuthority({ registries: { caller: "ignored" } });
+  begin(authority); answerAll(authority); contracts.requestAuditExecution({ authority, auditId: "audit" });
+  return authority;
+};
 
-function groundedAuthority() {
-  const a = createArchitectureAuthority();
-  run(a, trustedAdapters.initialInput({ revisionId: "cuv", value: "利用者が目的を達成できる" }));
-  run(a, R.mapCoreUserValue({ patternIds: ["pr0_interactive_value"] }));
-  run(a, trustedAdapters.userAnswer({ revisionId: "answer", decisionInstanceId: "dec:answer", value: "A", evidenceText: "A", scopeKey: "s" }));
-  run(a, R.target({ id: "target", kind: "requirement", classification: "product_requirement", scopeKey: "s", valueSchemaId: "enum" }));
-  run(a, R.evidence({ edgeId: "edge", sourceRevisionId: "answer", targetId: "target", relation: "explicitly_states", targetScopeKey: "s", evidenceSpan: "A", derivationDepth: 0 }));
-  return a;
-}
-
-function completeAuthority() {
-  const a = groundedAuthority();
-  for (const slotTemplateId of [...UNIVERSAL_SLOT_TEMPLATES, "pattern_primary_capability"]) {
-    const targetId = `slot-target:${slotTemplateId}`;
-    const edgeId = `slot-edge:${slotTemplateId}`;
-    run(a, R.target({ id: targetId, kind: "requirement", classification: "product_requirement", scopeKey: "s", valueSchemaId: "enum", slotTemplateId }));
-    run(a, R.evidence({ edgeId, sourceRevisionId: "answer", targetId, relation: "explicitly_states", targetScopeKey: "s", evidenceSpan: "A", derivationDepth: 0 }));
-    run(a, R.settleSlot({ slotTemplateId, evidenceEdgeId: edgeId }));
-  }
-  run(a, R.capability({ id: "cap", capabilityTypeId: "interaction", managedObjectIds: [], actorIds: [], scopeKey: "s", groundingTargetId: "target", blocking: true, provisional: false }));
-  run(a, R.decision({ id: "decision", revisionId: "answer", groundingTargetId: "target" }));
-  run(a, R.source({ id: "invariant", kind: "core_invariant", scopeKey: "s", groundingTargetId: "target", evidenceEdgeIds: ["edge"] }));
-  run(a, R.source({ id: "flow", kind: "primary_flow", scopeKey: "s", groundingTargetId: "target", evidenceEdgeIds: ["edge"] }));
-  for (const sourceId of ["cap", "decision", "invariant", "flow"]) run(a, R.claim({ claimId: `claim:${sourceId}`, claimTypeId: "required_product", sourceId, scopeKey: "s", evidenceEdgeId: "edge" }));
-  run(a, R.graphFixpoint());
-  const fp = requirementFingerprint({ authority: a });
-  run(a, trustedAdapters.auditExecutor.completed({ auditId: "audit", executorId: "coverage-audit-v1", auditRuleId: "final-coverage-v1", executionId: "exec-1", executorVersion: "1", requirementFingerprint: fp, gapEvaluation: { complete: true, errorKinds: [], rejectedGapFingerprints: [] } }));
-  return a;
-}
-
-test("Command Trust Boundary rejects plain commands and user-authority forgery", () => {
-  const a = createArchitectureAuthority();
-  assert.throws(() => run(a, { type: "add_revision", authority: "user" }), /untrusted/);
-  assert.throws(() => run(a, R.mapCoreUserValue({ patternIds: ["pr0_interactive_value"] })), /invalid core user value mapping/);
-  run(a, trustedAdapters.initialInput({ revisionId: "i", value: "x" }));
-  assert.throws(() => run(a, trustedAdapters.userAnswer({ revisionId: "u", value: "x", evidenceText: "", scopeKey: "s" })), /invalid user source/);
+test("public API exports raw-event requests, not adapters or authority commands", () => {
+  assert.equal("trustedAdapters" in contracts, false);
+  assert.equal("executeAuthorityCommand" in contracts, false);
+  const authority = contracts.createArchitectureAuthority({ registries: { auditExecutor: "evil" } });
+  assert.equal(Object.isFrozen(authority), true);
+  assert.equal(authority.registries, undefined);
+  assert.throws(() => contracts.submitRawUserAnswer({ authority, event: { eventId: "x", questionId: "fake", text: "x", authority: "user" } }), /unknown issued question/);
 });
 
-test("Core User Value is a grounded completion root and caller cannot settle slots", () => {
-  const a = createArchitectureAuthority();
-  assert.equal(capabilityCoverageProof({ authority: a }).complete, false);
-  assert.throws(() => run(a, { type: "settle_slot", status: "satisfied" }), /untrusted/);
-  const b = groundedAuthority();
-  assert.equal(capabilityCoverageProof({ authority: b }).complete, false);
-  assert.throws(() => run(b, R.settleSlot({ slotTemplateId: "required_input", evidenceEdgeId: "edge" })), /does not match/);
-  for (const slotTemplateId of [...UNIVERSAL_SLOT_TEMPLATES, "pattern_primary_capability"]) {
-    const targetId = `slot-target:${slotTemplateId}`;
-    const edgeId = `slot-edge:${slotTemplateId}`;
-    run(b, R.target({ id: targetId, kind: "requirement", classification: "product_requirement", scopeKey: "s", valueSchemaId: "enum", slotTemplateId }));
-    run(b, R.evidence({ edgeId, sourceRevisionId: "answer", targetId, relation: "explicitly_states", targetScopeKey: "s", evidenceSpan: "A", derivationDepth: 0 }));
-    run(b, R.settleSlot({ slotTemplateId, evidenceEdgeId: edgeId }));
-  }
-  assert.equal(capabilityCoverageProof({ authority: b }).complete, true);
+test("raw event provenance is immutable and modified replays are rejected", () => {
+  const authority = contracts.createArchitectureAuthority();
+  begin(authority, "same", "original");
+  assert.equal(begin(authority, "same", "original").replay, true);
+  assert.throws(() => begin(authority, "same", "modified"), /replay was modified/);
 });
 
-test("one unrelated evidence edge cannot ground a claim", () => {
-  const a = groundedAuthority();
-  run(a, R.target({ id: "other", kind: "requirement", classification: "product_requirement", scopeKey: "s", valueSchemaId: "enum" }));
-  run(a, R.evidence({ edgeId: "other-edge", sourceRevisionId: "answer", targetId: "other", relation: "explicitly_states", targetScopeKey: "s", evidenceSpan: "A", derivationDepth: 0 }));
-  run(a, R.capability({ id: "cap", capabilityTypeId: "x", managedObjectIds: [], actorIds: [], scopeKey: "s", groundingTargetId: "target", blocking: true, provisional: false }));
-  assert.throws(() => run(a, R.claim({ claimId: "bad", claimTypeId: "required_product", sourceId: "cap", scopeKey: "s", evidenceEdgeId: "other-edge" })), /does not ground/);
+test("caller supplied authority, classification, relation, and slot status are not semantic inputs", () => {
+  const authority = contracts.createArchitectureAuthority(); begin(authority);
+  const [question] = contracts.listPendingQuestions({ authority });
+  contracts.submitRawUserAnswer({ authority, event: { eventId: "a", questionId: question.questionId, text: "回答", authority: "user", classification: "implementation_proposal", relation: "fake", accepted: true, status: "satisfied" } });
+  assert.equal(contracts.capabilityCoverageProof({ authority }).complete, false);
+  assert.throws(() => contracts.submitRawUserAnswer({ authority, event: { eventId: "b", questionId: "question:invented", text: "回答", status: "satisfied" } }), /unknown issued question/);
 });
 
-test("caller cannot register a passed audit outcome", () => {
-  const a = completeAuthority();
-  assert.throws(() => run(a, { type: "add_audit", outcome: "passed" }), /untrusted/);
-  assert.throws(() => run(a, trustedAdapters.auditExecutor.completed({ auditId: "bad", executorId: "coverage-audit-v1", auditRuleId: "final-coverage-v1", executionId: "bad", executorVersion: "1", requirementFingerprint: requirementFingerprint({ authority: a }), gapEvaluation: { complete: false, errorKinds: ["gap"] } })), /invalid completed audit/);
+test("a slot is settled only by an answer to its internally issued question", () => {
+  const authority = contracts.createArchitectureAuthority(); begin(authority);
+  const questions = contracts.listPendingQuestions({ authority });
+  contracts.submitRawUserAnswer({ authority, event: { eventId: "only-one", questionId: questions[0].questionId, text: "回答" } });
+  const proof = contracts.capabilityCoverageProof({ authority });
+  assert.ok(proof.unknownBlockingSlotIds.length > 0);
+  assert.equal(proof.complete, false);
 });
 
-test("decision revision state machine prevents duplicate current revisions", () => {
-  const a = groundedAuthority();
-  assert.throws(() => run(a, trustedAdapters.userAnswer({ revisionId: "second", decisionInstanceId: "dec:answer", value: "B", evidenceText: "B", scopeKey: "s" })), /current revision already exists/);
+test("claim grounding is internally derived from source target and current evidence", () => {
+  const authority = contracts.createArchitectureAuthority(); begin(authority); answerAll(authority);
+  const proof = contracts.claimCoverageProof({ authority });
+  assert.equal(proof.complete, true);
+  assert.equal(proof.uncoveredBlockingSourceIds.length, 0);
 });
 
-test("a stale decision dependency cannot be reused for Final Completion", () => {
-  const a = completeAuthority();
-  const specElements = [{ id: "fr", kind: "functional_requirement", sourceClaimIds: ["claim:cap"] }, { id: "ac", kind: "acceptance_criteria", sourceClaimIds: ["claim:decision"] }, { id: "flow", kind: "primary_flow_step", sourceClaimIds: ["claim:flow"] }, { id: "err", kind: "error_handling_rule", sourceClaimIds: ["claim:invariant"] }];
-  run(a, trustedAdapters.userAnswer({ revisionId: "answer-2", decisionInstanceId: "dec:answer", supersedesRevisionId: "answer", value: "B", evidenceText: "B", scopeKey: "s" }));
-  assert.equal(finalCompletionProof({ authority: a, auditId: "audit", specElements }).complete, false);
+test("caller cannot create passed audit results or Final Completion by supplying gate values", () => {
+  const authority = contracts.createArchitectureAuthority(); begin(authority);
+  const audit = contracts.requestAuditExecution({ authority, auditId: "audit", passed: true, outcome: "passed", gapEvaluation: { complete: true } });
+  assert.equal(audit.passed, false);
+  assert.equal(contracts.finalCompletionProof({ authority, auditId: "audit", provisional: { complete: true }, specElements: [{ sourceClaimIds: ["fake"] }] }).complete, false);
 });
 
-test("Final Completion cannot bypass Provisional proof or graph fixpoint", () => {
-  const a = completeAuthority();
-  const specElements = [{ id: "fr", kind: "functional_requirement", sourceClaimIds: ["claim:cap"] }, { id: "ac", kind: "acceptance_criteria", sourceClaimIds: ["claim:decision"] }, { id: "flow", kind: "primary_flow_step", sourceClaimIds: ["claim:flow"] }, { id: "err", kind: "error_handling_rule", sourceClaimIds: ["claim:invariant"] }];
-  assert.equal(provisionalCompletionProof({ authority: a }).complete, true);
-  assert.equal(finalCompletionProof({ authority: a, auditId: "audit", specElements }).complete, true);
-  const b = groundedAuthority();
-  assert.equal(finalCompletionProof({ authority: b, auditId: "missing", specElements }).complete, false);
-  run(a, R.conflict({ id: "conflict-1", sourceIds: ["decision"] }));
-  assert.equal(finalCompletionProof({ authority: a, auditId: "audit", specElements }).complete, false);
-  assert.throws(() => run(a, { type: "mark_graph_fixpoint" }), /untrusted/);
+test("all semantic state is derived from raw events through current internal revisions", () => {
+  const authority = complete();
+  assert.equal(contracts.provisionalCompletionProof({ authority }).complete, true);
+  assert.equal(contracts.finalCompletionProof({ authority, auditId: "audit" }).complete, true);
 });
 
-test("migration accepts only trusted adapter output, not caller supplied legacy facts", () => {
-  const a = createArchitectureAuthority();
-  assert.throws(() => run(a, { type: "register_legacy_snapshot", facts: [{ source: "user_confirmed" }] }), /untrusted/);
-  const id = "snapshot-1";
-  run(a, trustedAdapters.migrationAdapter.v4Export({ snapshotId: id, adapterId: "v4-authoritative-export-v1", adapterVersion: "1", sourceContextVersion: "v4", sourceFingerprint: "source-hash", compatibleRegistryVersions: ["v5-pr0.3"], exportProof: "verified-export" }));
-  assert.equal(migrateV4Context({ authority: a, snapshotId: id }).projection.sourceSnapshotId, id);
+test("old audit cannot be reused after a semantic state change", () => {
+  const authority = contracts.createArchitectureAuthority(); begin(authority);
+  const questions = contracts.listPendingQuestions({ authority });
+  contracts.submitRawUserAnswer({ authority, event: { eventId: "first", questionId: questions[0].questionId, text: "first" } });
+  contracts.requestAuditExecution({ authority, auditId: "audit" });
+  contracts.submitRawUserAnswer({ authority, event: { eventId: "second", questionId: questions[1].questionId, text: "second" } });
+  assert.equal(contracts.auditTerminalState({ authority, auditId: "audit" }).state, "stale");
+  assert.equal(contracts.finalCompletionProof({ authority, auditId: "audit" }).complete, false);
 });
 
-test("canonical identity preserves null versus empty arrays", () => {
-  assert.notDeepEqual(canonicalCapabilityKey({ capabilityTypeId: "x", managedObjectIds: null, actorIds: [] }), canonicalCapabilityKey({ capabilityTypeId: "x", managedObjectIds: [], actorIds: [] }));
+test("registry replacement and migration facts have no public authority path", () => {
+  const authority = contracts.createArchitectureAuthority({ registries: { slotRegistry: { slots: [] } } }); begin(authority);
+  assert.equal(contracts.listPendingQuestions({ authority }).length, contracts.UNIVERSAL_SLOT_TEMPLATES.length + 1);
+  assert.deepEqual(contracts.requestMigration({ authority, request: { sourceId: "fake", facts: [{ authority: "user" }], exportProof: "forged", sourceFingerprint: "fake" } }), { accepted: false, reason: "no_internal_authenticated_legacy_source" });
+  assert.equal(contracts.currentMigrationProjection({ authority, sourceFactFingerprint: "fake" }), null);
+});
+
+test("canonical identity preserves null versus empty arrays and excludes display metadata", () => {
+  const a = contracts.canonicalCapabilityKey({ capabilityTypeId: "x", managedObjectIds: null, actorIds: [] });
+  const b = contracts.canonicalCapabilityKey({ capabilityTypeId: "x", managedObjectIds: [], actorIds: [] });
+  assert.notDeepEqual(a, b);
+  assert.equal(contracts.capabilityInstanceId({ capabilityTypeId: "x", managedObjectIds: [], actorIds: [], displayLabel: "A" }), contracts.capabilityInstanceId({ capabilityTypeId: "x", managedObjectIds: [], actorIds: [], displayLabel: "B" }));
 });
