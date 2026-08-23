@@ -3,8 +3,12 @@ import assert from "node:assert/strict";
 import * as contracts from "../src/requirements-v5/contracts.js";
 
 const begin = (authority, id = "initial", text = "利用者が目的を達成できるアプリ") => contracts.submitRawInitialInput({ authority, event: { eventId: id, text, authority: "user", classification: "product_requirement" } });
+const validAnswer = (question) => ({
+  enum_actor: "single_actor", enum_interaction: "select", boolean: "true", integer: "1",
+  enum_boundary: "local", enum_failure: "visible", meaningful_text: `有効な${question.slotTemplateId}の回答`,
+}[question.answerSchemaId]);
 const answerAll = (authority) => {
-  for (const [index, question] of contracts.listPendingQuestions({ authority }).entries()) contracts.submitRawUserAnswer({ authority, event: { eventId: `answer-${index}`, questionId: question.questionId, text: `利用者が${question.slotTemplateId}を選ぶ`, relation: "directly_entails", status: "satisfied" } });
+  for (const [index, question] of contracts.listPendingQuestions({ authority }).entries()) contracts.submitRawUserAnswer({ authority, event: { eventId: `answer-${index}`, questionId: question.questionId, text: validAnswer(question), relation: "directly_entails", status: "satisfied" } });
 };
 const complete = () => {
   const authority = contracts.createArchitectureAuthority({ registries: { caller: "ignored" } });
@@ -31,7 +35,7 @@ test("raw event provenance is immutable and modified replays are rejected", () =
 test("caller supplied authority, classification, relation, and slot status are not semantic inputs", () => {
   const authority = contracts.createArchitectureAuthority(); begin(authority);
   const [question] = contracts.listPendingQuestions({ authority });
-  contracts.submitRawUserAnswer({ authority, event: { eventId: "a", questionId: question.questionId, text: "回答", authority: "user", classification: "implementation_proposal", relation: "fake", accepted: true, status: "satisfied" } });
+  contracts.submitRawUserAnswer({ authority, event: { eventId: "a", questionId: question.questionId, text: validAnswer(question), authority: "user", classification: "implementation_proposal", relation: "fake", accepted: true, status: "satisfied" } });
   assert.equal(contracts.capabilityCoverageProof({ authority }).complete, false);
   assert.throws(() => contracts.submitRawUserAnswer({ authority, event: { eventId: "b", questionId: "question:invented", text: "回答", status: "satisfied" } }), /unknown issued question/);
 });
@@ -39,10 +43,35 @@ test("caller supplied authority, classification, relation, and slot status are n
 test("a slot is settled only by an answer to its internally issued question", () => {
   const authority = contracts.createArchitectureAuthority(); begin(authority);
   const questions = contracts.listPendingQuestions({ authority });
-  contracts.submitRawUserAnswer({ authority, event: { eventId: "only-one", questionId: questions[0].questionId, text: "回答" } });
+  contracts.submitRawUserAnswer({ authority, event: { eventId: "only-one", questionId: questions[0].questionId, text: validAnswer(questions[0]) } });
   const proof = contracts.capabilityCoverageProof({ authority });
   assert.ok(proof.unknownBlockingSlotIds.length > 0);
   assert.equal(proof.complete, false);
+});
+
+test("empty and schema-invalid answers remain raw events and never reach Final Completion", () => {
+  for (const invalid of ["", " ", "\n"]) {
+    const authority = contracts.createArchitectureAuthority(); begin(authority, `initial-${JSON.stringify(invalid)}`);
+    for (const [index, question] of contracts.listPendingQuestions({ authority }).entries()) contracts.submitRawUserAnswer({ authority, event: { eventId: `empty-${index}`, questionId: question.questionId, text: invalid } });
+    contracts.requestAuditExecution({ authority, auditId: "audit" });
+    assert.equal(contracts.finalCompletionProof({ authority, auditId: "audit" }).complete, false);
+  }
+  const authority = contracts.createArchitectureAuthority(); begin(authority);
+  const questions = contracts.listPendingQuestions({ authority });
+  const schemas = { enum_actor: "unknown", boolean: "maybe", integer: "NaN" };
+  for (const question of questions.filter((item) => schemas[item.answerSchemaId])) {
+    const result = contracts.submitRawUserAnswer({ authority, event: { eventId: `invalid-${question.answerSchemaId}`, questionId: question.questionId, text: schemas[question.answerSchemaId] } });
+    assert.equal(result.evidenceAccepted, false);
+  }
+  assert.equal(contracts.capabilityCoverageProof({ authority }).complete, false);
+});
+
+test("one valid answer cannot be reused to close another slot", () => {
+  const authority = contracts.createArchitectureAuthority(); begin(authority);
+  const [first, second] = contracts.listPendingQuestions({ authority });
+  contracts.submitRawUserAnswer({ authority, event: { eventId: "valid", questionId: first.questionId, text: validAnswer(first) } });
+  assert.throws(() => contracts.submitRawUserAnswer({ authority, event: { eventId: "valid", questionId: second.questionId, text: validAnswer(second) } }), /replay was modified/);
+  assert.equal(contracts.capabilityCoverageProof({ authority }).complete, false);
 });
 
 test("claim grounding is internally derived from source target and current evidence", () => {
@@ -68,9 +97,9 @@ test("all semantic state is derived from raw events through current internal rev
 test("old audit cannot be reused after a semantic state change", () => {
   const authority = contracts.createArchitectureAuthority(); begin(authority);
   const questions = contracts.listPendingQuestions({ authority });
-  contracts.submitRawUserAnswer({ authority, event: { eventId: "first", questionId: questions[0].questionId, text: "first" } });
+  contracts.submitRawUserAnswer({ authority, event: { eventId: "first", questionId: questions[0].questionId, text: validAnswer(questions[0]) } });
   contracts.requestAuditExecution({ authority, auditId: "audit" });
-  contracts.submitRawUserAnswer({ authority, event: { eventId: "second", questionId: questions[1].questionId, text: "second" } });
+  contracts.submitRawUserAnswer({ authority, event: { eventId: "second", questionId: questions[1].questionId, text: validAnswer(questions[1]) } });
   assert.equal(contracts.auditTerminalState({ authority, auditId: "audit" }).state, "stale");
   assert.equal(contracts.finalCompletionProof({ authority, auditId: "audit" }).complete, false);
 });
