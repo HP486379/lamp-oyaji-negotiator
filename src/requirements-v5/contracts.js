@@ -1,217 +1,39 @@
-/**
- * v5 PR0 executable architecture contracts.
- * This module is deliberately unused by the v4 runtime.  It fixes the
- * deterministic data contracts that later v5 state-machine PRs will consume.
- */
+/** v5 PR0 contracts. Completion facts come only from registries and ledgers. */
 import { createHash } from "node:crypto";
-
-export const Authority = Object.freeze(["user", "delegated_to_system", "system_inference"]);
-export const Confirmation = Object.freeze(["explicitly_confirmed", "accepted_recommendation", "not_confirmed"]);
-export const RequirementClassification = Object.freeze(["product_requirement", "presentation_preference", "implementation_constraint", "implementation_proposal"]);
-export const Currentness = Object.freeze(["current", "superseded", "inactive", "stale"]);
-export const TraitAssertionStatus = Object.freeze(["supported", "explicitly_rejected", "unknown", "not_evaluated", "not_applicable", "inactive_due_to_scope"]);
-export const CapabilityRelevance = Object.freeze(["required_for_core_value", "required_for_primary_flow", "explicitly_requested", "supporting", "unknown"]);
-export const GenericBehaviorFamily = Object.freeze(["input_consuming", "output_producing", "state_changing", "external_acting", "continuous_interaction", "decision_producing", "content_generating"]);
-export const CoverageAuditState = Object.freeze(["not_run", "passed", "blocking_gap_found", "failed_retryable", "failed_terminal", "inconclusive_limit_reached", "stale"]);
-
-const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-const sortedIds = (values = []) => [...new Set(values)].sort();
-const nullable = (value) => value == null ? null : value;
-export function canonicalCapabilityKey(key) {
-  return { capabilityTypeId: key.capabilityTypeId, parentCapabilityInstanceId: nullable(key.parentCapabilityInstanceId), managedObjectIds: sortedIds(key.managedObjectIds), actorIds: sortedIds(key.actorIds), phaseKindId: nullable(key.phaseKindId) };
-}
-export function canonicalDecisionKey(key, definition = null) {
-  const canonical = { decisionTypeId: key.decisionTypeId, capabilityInstanceId: nullable(key.capabilityInstanceId), managedObjectIds: sortedIds(key.managedObjectIds), actorIds: sortedIds(key.actorIds), phaseKindId: nullable(key.phaseKindId) };
-  if (!canonical.capabilityInstanceId && definition && definition.globalScopeAllowed !== true) throw new Error("decision scope requires a capability instance");
-  return canonical;
-}
-export const capabilityInstanceId = (key) => `cap:${hash(canonicalCapabilityKey(key))}`;
-export const decisionInstanceId = (key, definition) => `dec:${hash(canonicalDecisionKey(key, definition))}`;
-
-export const REGISTRY_VERSION_SET = Object.freeze({
-  decisionType: "v5-pr0.1", capabilityType: "v5-pr0.1", trait: "v5-pr0.1", coreUserValuePattern: "v5-pr0.1", primaryInteractionType: "v5-pr0.1", actorType: "v5-pr0.1", managedObjectType: "v5-pr0.1", slotTemplate: "v5-pr0.1", activationRule: "v5-pr0.1", classificationRule: "v5-pr0.1", criticalityRule: "v5-pr0.1", claimType: "v5-pr0.1", issueType: "v5-pr0.1", questionTemplate: "v5-pr0.1", entailmentRule: "v5-pr0.1" });
-export const UNIVERSAL_SLOT_TEMPLATES = Object.freeze([
-  "actor_participation", "primary_interaction", "required_input", "required_output", "success_observability", "state_continuity", "external_boundary", "failure_observability",
-]);
-export const EVIDENCE_RELATION_REGISTRY = Object.freeze([
-  { relation: "explicitly_supports", sourceKind: "answer", targetKind: "requirement", maxDerivationDepth: 0, requiresParentEdge: false },
-  { relation: "explicitly_rejects", sourceKind: "answer", targetKind: "requirement", maxDerivationDepth: 0, requiresParentEdge: false },
-  { relation: "directly_entails", sourceKind: "answer", targetKind: "requirement", maxDerivationDepth: 1, requiresParentEdge: false },
-]);
-const universalSlotDefinitions = Object.freeze(UNIVERSAL_SLOT_TEMPLATES.map((slotTemplateId) => ({ slotTemplateId, slotClass: "universal", registryVersion: REGISTRY_VERSION_SET.slotTemplate })));
-export const DEFAULT_SLOT_REGISTRY = Object.freeze({
-  registryVersion: REGISTRY_VERSION_SET.slotTemplate,
-  semanticRegistryVersion: REGISTRY_VERSION_SET.coreUserValuePattern,
-  slotTemplates: universalSlotDefinitions,
-  coreUserValuePatterns: [],
-});
-
-export function createDecisionLedger() { return { revisions: new Map(), heads: new Map() }; }
-export function appendDecisionRevision(ledger, revision, { expectedCurrentRevisionId = null } = {}) {
-  const head = ledger.heads.get(revision.decisionInstanceId) ?? null;
-  if (head !== expectedCurrentRevisionId) throw new Error("optimistic concurrency conflict");
-  if (revision.currentness !== "current") throw new Error("new decision revision must be current");
-  if (revision.supersedesRevisionId && revision.supersedesRevisionId !== head) throw new Error("supersedes must target current head");
-  if (revision.supersedesRevisionId === revision.revisionId || ledger.revisions.has(revision.revisionId)) throw new Error("revision cycle or duplicate");
-  const next = { ...revision, evidenceEdgeIds: sortedIds(revision.evidenceEdgeIds), dependsOnRevisionIds: sortedIds(revision.dependsOnRevisionIds) };
-  if (head) ledger.revisions.set(head, { ...ledger.revisions.get(head), currentness: "superseded" });
-  ledger.revisions.set(next.revisionId, next); ledger.heads.set(next.decisionInstanceId, next.revisionId); return next;
-}
-export function decisionProjection(ledger, instanceId, owningCapabilityActive = true) {
-  const revision = ledger.revisions.get(ledger.heads.get(instanceId));
-  if (!owningCapabilityActive) return "inactive";
-  if (!revision) return "unresolved";
-  if (revision.currentness === "stale" || revision.dependsOnRevisionIds.some((id) => ledger.revisions.get(id)?.currentness === "stale")) return "stale";
-  return revision.authority === "delegated_to_system" ? "delegated" : "settled";
-}
-export function createTraitLedger() { return { revisions: new Map(), heads: new Map() }; }
-export function appendTraitAssertion(ledger, assertion) {
-  const scope = `${assertion.traitId}:${assertion.scopeKey}`; const head = ledger.heads.get(scope);
-  if (assertion.currentness !== "current" || assertion.status === "superseded") throw new Error("trait assertion must be a current assertion");
-  if (assertion.supersedesAssertionId && assertion.supersedesAssertionId !== head) throw new Error("trait supersedes must target current head");
-  if (head) ledger.revisions.set(head, { ...ledger.revisions.get(head), currentness: "superseded", status: "superseded" });
-  ledger.revisions.set(assertion.revisionId, { ...assertion, evidenceEdgeIds: sortedIds(assertion.evidenceEdgeIds) }); ledger.heads.set(scope, assertion.revisionId); return assertion;
-}
-
-export function validateEvidenceEdge(edge, {
-  sourceRevision,
-  sourceText = "",
-  sourceKind,
-  targetKind,
-  sourceClassification,
-  targetClassification,
-  expectedTargetScopeKey,
-  relationRegistry = EVIDENCE_RELATION_REGISTRY,
-  parentEdgeIds = [],
-  excludedEvidenceConflict = false,
-  supersededEvidenceConflict = false,
-  registeredEntailmentRules = [],
-  explicitStructuredAnswer = false,
-  registeredTransforms = [],
-} = {}) {
-  const reject = (reason) => ({ accepted: false, reviewRequired: true, reason });
-  if (!sourceRevision || sourceRevision.currentness !== "current") return reject("stale_or_missing_source");
-  if (typeof edge?.evidenceSpan !== "string" || edge.evidenceSpan !== String(sourceText)) return reject("evidence_span_not_exact");
-  if (excludedEvidenceConflict || supersededEvidenceConflict) return reject("conflicting_evidence");
-  const rule = relationRegistry.find((candidate) => candidate.relation === edge.relation && candidate.sourceKind === sourceKind && candidate.targetKind === targetKind);
-  if (!rule) return reject("unregistered_relation_or_kind");
-  if (edge.targetScopeKey !== expectedTargetScopeKey) return reject("target_scope_mismatch");
-  if (rule.requiresParentEdge && (!edge.parentEdgeId || !parentEdgeIds.includes(edge.parentEdgeId))) return reject("missing_parent_edge");
-  if (edge.parentEdgeId && !parentEdgeIds.includes(edge.parentEdgeId)) return reject("unknown_parent_edge");
-  if (!Number.isInteger(edge.derivationDepth) || edge.derivationDepth < 0 || edge.derivationDepth > rule.maxDerivationDepth) return reject("derivation_depth_exceeded");
-  if (rule.allowedSourceClassifications && !rule.allowedSourceClassifications.includes(sourceClassification)) return reject("source_classification_mismatch");
-  if (rule.allowedTargetClassifications && !rule.allowedTargetClassifications.includes(targetClassification)) return reject("target_classification_mismatch");
-  if (edge.relation !== "directly_entails") return { accepted: true, reviewRequired: false };
-  const registeredEntailment = registeredEntailmentRules.some((candidate) => candidate.entailmentRuleId === edge.entailmentRuleId && candidate.sourceKind === sourceKind && candidate.targetKind === targetKind && candidate.maxDerivationDepth >= edge.derivationDepth);
-  const registeredTransform = registeredTransforms.some((candidate) => candidate.transformId === edge.transformId && candidate.sourceKind === sourceKind && candidate.targetKind === targetKind && candidate.maxDerivationDepth >= edge.derivationDepth);
-  return registeredEntailment || registeredTransform || explicitStructuredAnswer === true
-    ? { accepted: true, reviewRequired: false }
-    : reject("unregistered_entailment");
-}
-
-function inspectSlotRegistry(registry, requestedPatternIds = [], semanticRegistryVersion) {
-  const errors = [];
-  if (!registry || registry.registryVersion !== REGISTRY_VERSION_SET.slotTemplate || registry.semanticRegistryVersion !== REGISTRY_VERSION_SET.coreUserValuePattern || semanticRegistryVersion !== registry.semanticRegistryVersion) errors.push("registry_version_mismatch");
-  const templates = registry?.slotTemplates ?? [];
-  const templateById = new Map(templates.map((template) => [template.slotTemplateId, template]));
-  const missingUniversal = UNIVERSAL_SLOT_TEMPLATES.filter((id) => {
-    const template = templateById.get(id);
-    return !template || template.slotClass !== "universal" || template.registryVersion !== registry?.registryVersion;
-  });
-  if (missingUniversal.length) errors.push("missing_universal_templates");
-  const patterns = registry?.coreUserValuePatterns ?? [];
-  const patternById = new Map(patterns.map((pattern) => [pattern.coreUserValuePatternId, pattern]));
-  const unknownPatternIds = requestedPatternIds.filter((id) => !patternById.has(id));
-  if (unknownPatternIds.length) errors.push("unknown_requested_pattern");
-  const uncoveredPatternIds = patterns.filter((pattern) => pattern.registryVersion !== registry?.semanticRegistryVersion || !(pattern.requiredSlotTemplateIds ?? []).every((id) => {
-    const template = templateById.get(id);
-    return template && template.slotClass === "core_value_pattern" && template.registryVersion === registry?.registryVersion;
-  })).map((pattern) => pattern.coreUserValuePatternId);
-  if (uncoveredPatternIds.length) errors.push("uncovered_registered_pattern");
-  return { errors, templates, patternById, missingUniversal, unknownPatternIds, uncoveredPatternIds };
-}
-export function generateCapabilitySlots({ coreUserValuePatternIds = [], patternMappings = [], slotRegistry = DEFAULT_SLOT_REGISTRY, semanticRegistryVersion = REGISTRY_VERSION_SET.coreUserValuePattern, aiCandidates = [] } = {}) {
-  const inspection = inspectSlotRegistry(slotRegistry, coreUserValuePatternIds, semanticRegistryVersion);
-  const requestedPatterns = coreUserValuePatternIds.map((id) => inspection.patternById.get(id)).filter(Boolean);
-  const ids = [...new Set([...UNIVERSAL_SLOT_TEMPLATES, ...requestedPatterns.flatMap((pattern) => pattern.requiredSlotTemplateIds ?? [])])];
-  return ids.map((slotTemplateId) => ({ slotInstanceId: `slot:${slotTemplateId}`, slotTemplateId, scopeKey: "global", status: "unknown", capabilityInstanceIds: [], evidenceEdgeIds: [], proofRuleId: "pr0-slot-default" , aiCandidateCount: aiCandidates.length, coreUserValuePatternIds: sortedIds(coreUserValuePatternIds), patternMappings }));
-}
-export function slotRegistryCoverageProof({ slotRegistry = DEFAULT_SLOT_REGISTRY, coreUserValuePatternIds = [], semanticRegistryVersion = REGISTRY_VERSION_SET.coreUserValuePattern } = {}) {
-  const inspection = inspectSlotRegistry(slotRegistry, coreUserValuePatternIds, semanticRegistryVersion);
-  return { coreUserValuePatternIds: sortedIds(coreUserValuePatternIds), universalSlotTemplateIds: sortedIds((slotRegistry?.slotTemplates ?? []).filter((template) => template.slotClass === "universal").map((template) => template.slotTemplateId)), coveredPatternIds: sortedIds((slotRegistry?.coreUserValuePatterns ?? []).filter((pattern) => !inspection.uncoveredPatternIds.includes(pattern.coreUserValuePatternId)).map((pattern) => pattern.coreUserValuePatternId)), uncoveredPatternIds: sortedIds([...inspection.unknownPatternIds, ...inspection.uncoveredPatternIds]), registryVersion: slotRegistry?.registryVersion ?? null, semanticRegistryVersion: slotRegistry?.semanticRegistryVersion ?? null, errors: inspection.errors, complete: inspection.errors.length === 0 };
-}
-export function capabilityCoverageProof({ requirementFingerprint, slotRegistry, coreUserValuePatternIds = [], semanticRegistryVersion = REGISTRY_VERSION_SET.coreUserValuePattern, patternState, slots = [], provisionalCapabilities = [] }) {
-  const registryCoverage = slotRegistryCoverageProof({ slotRegistry, coreUserValuePatternIds, semanticRegistryVersion });
-  const unknownBlockingSlotIds = slots.filter((slot) => slot.status === "unknown" || (slot.conditional === true && slot.status === "not_applicable" && !slot.notApplicableRuleId)).map((slot) => slot.slotInstanceId);
-  const provisionalBlockingCapabilityIds = provisionalCapabilities.filter((item) => item.blocking).map((item) => item.id);
-  return { requirementFingerprint, registryVersion: REGISTRY_VERSION_SET.slotTemplate, slotGeneratorVersion: "v5-pr0.1", slotRegistryCoverageProofId: hash(registryCoverage), slotInstanceIds: slots.map((slot) => slot.slotInstanceId), unknownBlockingSlotIds, provisionalBlockingCapabilityIds, complete: registryCoverage.complete && ["mapped", "user_confirmed"].includes(patternState) && !unknownBlockingSlotIds.length && !provisionalBlockingCapabilityIds.length };
-}
-export function genericEnvelope({ behaviorFamily, baselineEvaluated, blockingDecisionMapped, unresolvedGapBlocking }) {
-  return { behaviorFamily, completionContribution: false, mayPromoteToCapability: GenericBehaviorFamily.includes(behaviorFamily) && baselineEvaluated && blockingDecisionMapped && !unresolvedGapBlocking, unresolvedGapBlocking: Boolean(unresolvedGapBlocking) };
-}
-
-export function classifyRequirement({ impacts = {}, aiCandidate = null }) {
-  const axes = ["productVisibleState", "actorOperation", "requiredOutput", "dataBoundary", "primaryFlow", "externalConsequence"];
-  const matched = axes.filter((axis) => impacts[axis] === true);
-  if (matched.length) return { classification: "product_requirement", resolverRuleId: `classification:${matched[0]}`, provisional: false };
-  return { classification: aiCandidate ? "implementation_proposal" : "implementation_constraint", resolverRuleId: "classification:non_product", provisional: Boolean(aiCandidate) };
-}
-export function resolveCriticality({ decisionInstanceId, registeredRuleId = null, effects = {}, requirementFingerprint }) {
-  const blocking = Boolean(registeredRuleId) && Boolean(effects.coreCapability || effects.primaryFlow || effects.externalConsequence || effects.dataBoundary || effects.conflict);
-  return { decisionInstanceId, blocking, affectedCoreCapabilityIds: sortedIds(effects.affectedCoreCapabilityIds), affectedPrimaryFlowIds: sortedIds(effects.affectedPrimaryFlowIds), externalConsequenceAffected: Boolean(effects.externalConsequence), dataBoundaryAffected: Boolean(effects.dataBoundary), resolverRuleId: registeredRuleId ?? "criticality:ai_candidate_non_authoritative", requirementFingerprint };
-}
-export function resolveDelegation({ candidates = [], valueSchemaValid, inScope, coreInvariantSafe, noBlockingConflict, introducesCapability, expandsExternalConsequence, expandsDataBoundary }) {
-  const safe = valueSchemaValid && inScope && coreInvariantSafe && noBlockingConflict && !introducesCapability && !expandsExternalConsequence && !expandsDataBoundary;
-  return safe && candidates.length === 1 ? { settled: true, value: candidates[0], reason: "unique_safe_default" } : { settled: false, value: null, reason: !safe ? "boundary_violation" : candidates.length === 0 ? "no_safe_default" : "ambiguous_safe_default" };
-}
-
-export function requirementFingerprint(state) {
-  return hash({ coreUserValue: state.coreUserValue, actors: sortedIds(state.actors), managedObjects: sortedIds(state.managedObjects), activeCapabilities: sortedIds(state.activeCapabilities), traitHeads: sortedIds(state.traitHeads), decisionRevisions: state.decisionRevisions ?? [], openBlockingIssues: sortedIds(state.openBlockingIssues), registryVersions: state.registryVersions });
-}
-export const claimSetFingerprint = ({ requirementFingerprint: fp, claims = [], claimTypeRegistryVersion }) => hash({ requirementFingerprint: fp, claimIds: sortedIds(claims.map((claim) => claim.claimId ?? claim)), claimTypeRegistryVersion });
-export const completionCandidateFingerprint = ({ requirementFingerprint: fp, claimSetFingerprint: claimFp, finalCoverageAuditId }) => hash({ requirementFingerprint: fp, claimSetFingerprint: claimFp, finalCoverageAuditId });
-
-export function validateArtifactDag(edges) {
-  const nodes = new Set(edges.flatMap((edge) => [`${edge.fromArtifactKind}:${edge.fromArtifactId}`, `${edge.toArtifactKind}:${edge.toArtifactId}`])); const adjacency = new Map([...nodes].map((node) => [node, []]));
-  for (const edge of edges) adjacency.get(`${edge.fromArtifactKind}:${edge.fromArtifactId}`).push(`${edge.toArtifactKind}:${edge.toArtifactId}`);
-  const visiting = new Set(), visited = new Set(); const visit = (node) => { if (visiting.has(node)) throw new Error("artifact dependency cycle"); if (visited.has(node)) return; visiting.add(node); for (const next of adjacency.get(node)) visit(next); visiting.delete(node); visited.add(node); };
-  for (const node of nodes) visit(node); return true;
-}
-export function propagateStaleTransaction({ edges, changedArtifactId, fail = false }) {
-  validateArtifactDag(edges); if (fail) throw new Error("stale propagation transaction failed");
-  // Edges point from an input artifact to the artifact derived from it. A
-  // source revision therefore invalidates its reachable downstream artifacts.
-  const downstream = new Map(); for (const edge of edges) { const from = `${edge.fromArtifactKind}:${edge.fromArtifactId}`, to = `${edge.toArtifactKind}:${edge.toArtifactId}`; downstream.set(from, [...(downstream.get(from) ?? []), to]); }
-  const stale = new Set([changedArtifactId]); const queue = [changedArtifactId]; while (queue.length) for (const next of downstream.get(queue.shift()) ?? []) if (!stale.has(next)) { stale.add(next); queue.push(next); } return [...stale].sort();
-}
-
-export function claimCoverageProof({ claimSetFingerprint: fp, sources = [], claims = [], claimTypeRegistry = [], noClaimRuleRegistry = [], currentEvidenceEdgeIds = [] }) {
-  const evidenceIds = new Set(currentEvidenceEdgeIds);
-  const supportedKinds = new Set(["capability", "decision", "core_invariant", "primary_flow"]);
-  const sourceRequiresClaim = (source) => source.currentness === "current" && ((source.kind === "capability" && source.blocking === true) || (source.kind === "decision" && source.classification === "product_requirement" && ["settled", "delegated"].includes(source.settlement)) || source.kind === "core_invariant" || source.kind === "primary_flow");
-  const entries = sources.map((source) => {
-    const requiresClaim = supportedKinds.has(source.kind) && sourceRequiresClaim(source);
-    const noClaimRule = noClaimRuleRegistry.find((rule) => rule.ruleId === source.noClaimRuleId && rule.allowsNoClaim === true && rule.sourceKinds?.includes(source.kind));
-    const matchingClaims = claims.filter((claim) => claim.sourceIds?.includes(source.id) && claim.currentness === "current" && claim.scopeKey === source.scopeKey && claimTypeRegistry.some((type) => type.claimTypeId === claim.claimTypeId && type.required === true && type.sourceKinds?.includes(source.kind)) && Array.isArray(claim.evidenceEdgeIds) && claim.evidenceEdgeIds.length > 0 && claim.evidenceEdgeIds.every((id) => evidenceIds.has(id)));
-    return { sourceKind: source.kind, sourceId: source.id, representedByClaimIds: matchingClaims.map((claim) => claim.claimId), explicitlyNoClaimReason: noClaimRule?.ruleId ?? null, stale: source.currentness !== "current", requiresClaim };
-  });
-  const uncoveredBlockingSourceIds = entries.filter((entry) => entry.requiresClaim && !entry.representedByClaimIds.length).map((entry) => entry.sourceId);
-  const invalidNoClaimReasonIds = sources.filter((source) => source.noClaimRuleId && !noClaimRuleRegistry.some((rule) => rule.ruleId === source.noClaimRuleId && rule.allowsNoClaim === true && rule.sourceKinds?.includes(source.kind))).map((source) => source.id);
-  const invalidClaimIds = claims.filter((claim) => claim.currentness !== "current" || !Array.isArray(claim.evidenceEdgeIds) || !claim.evidenceEdgeIds.length || !claim.evidenceEdgeIds.every((id) => evidenceIds.has(id)) || !claimTypeRegistry.some((type) => type.claimTypeId === claim.claimTypeId && type.required === true)).map((claim) => claim.claimId);
-  return { claimSetFingerprint: fp, entries, uncoveredBlockingSourceIds, invalidNoClaimReasonIds, invalidClaimIds, complete: !uncoveredBlockingSourceIds.length && !invalidNoClaimReasonIds.length && !invalidClaimIds.length };
-}
-export function auditTerminalState({ attempts, maxAttempts, errorKind = null, rejectedGapFingerprints = [], proposedGapFingerprint = null, blockingGapFound = false }) {
-  const normalizedRejected = sortedIds(rejectedGapFingerprints);
-  const retryableErrorKinds = new Set(["timeout", "malformed", "refusal", "transport", "server_error"]);
-  if (!Number.isInteger(attempts) || !Number.isInteger(maxAttempts) || attempts < 0 || maxAttempts < 1) return { state: "failed_terminal", rejectedGapFingerprints: normalizedRejected, reason: "invalid_audit_attempts" };
-  if (errorKind !== null) return { state: attempts >= maxAttempts ? "inconclusive_limit_reached" : retryableErrorKinds.has(errorKind) ? "failed_retryable" : "failed_terminal", rejectedGapFingerprints: normalizedRejected, reason: errorKind };
-  if (proposedGapFingerprint && normalizedRejected.includes(proposedGapFingerprint)) return { state: "failed_terminal", rejectedGapFingerprints: normalizedRejected, reason: "repeated_rejected_gap" };
-  if (blockingGapFound) return { state: "blocking_gap_found", rejectedGapFingerprints: normalizedRejected, reason: "blocking_gap_found" };
-  return { state: "passed", rejectedGapFingerprints: normalizedRejected };
-}
-export function migrateV4Context({ source, registryVersionSet, migrations = [] }) {
-  const sourceFactFingerprint = hash(source.facts ?? []); const key = hash({ sourceFactFingerprint, target: "v5", registryVersionSet }); const existing = migrations.find((item) => item.migrationId === key);
-  if (existing) return { record: existing, projection: existing.projection, created: false };
-  const projection = { userConfirmedRevisionIds: sortedIds((source.facts ?? []).filter((fact) => fact.source === "user_confirmed").map((fact) => fact.revisionId ?? fact.key)), legacyGeneratedArtifacts: (source.generatedSpec ? [source.generatedSpec] : []) };
-  const record = { migrationId: key, sourceContextVersion: source.version ?? "v4", targetContextVersion: "v5", sourceFactFingerprint, registryVersionSet, migrationStatus: "completed", migrationWarnings: [], projection }; return { record, projection, created: true };
-}
+export const REGISTRY_VERSION_SET = Object.freeze({ decisionType:"v5-pr0.2", capabilityType:"v5-pr0.2", trait:"v5-pr0.2", coreUserValuePattern:"v5-pr0.2", primaryInteractionType:"v5-pr0.2", actorType:"v5-pr0.2", managedObjectType:"v5-pr0.2", slotTemplate:"v5-pr0.2", activationRule:"v5-pr0.2", classificationRule:"v5-pr0.2", criticalityRule:"v5-pr0.2", claimType:"v5-pr0.2", issueType:"v5-pr0.2", questionTemplate:"v5-pr0.2", entailmentRule:"v5-pr0.2" });
+export const Authority=Object.freeze(["user","delegated_to_system","system_inference"]); export const Confirmation=Object.freeze(["explicitly_confirmed","accepted_recommendation","not_confirmed"]); export const RequirementClassification=Object.freeze(["product_requirement","presentation_preference","implementation_constraint","implementation_proposal"]); export const Currentness=Object.freeze(["current","superseded","inactive","stale"]); export const TraitAssertionStatus=Object.freeze(["supported","explicitly_rejected","unknown","not_evaluated","not_applicable","inactive_due_to_scope","superseded"]);
+export const UNIVERSAL_SLOT_TEMPLATES=Object.freeze(["actor_participation","primary_interaction","required_input","required_output","success_observability","state_continuity","external_boundary","failure_observability"]);
+export const GenericBehaviorFamily=Object.freeze(["input_consuming","output_producing","state_changing","external_acting","continuous_interaction","decision_producing","content_generating"]);
+export const REQUIRED_SPEC_ELEMENT_KINDS=Object.freeze(["functional_requirement","data_model_field","state_transition","error_handling_rule","acceptance_criteria","primary_flow_step","required_product_paragraph"]);
+const hash=(v)=>createHash("sha256").update(JSON.stringify(v)).digest("hex"); const ids=(v=[])=>[...new Set(v??[])].sort(); const map=(v=[])=>new Map(v.map(x=>[x.id??x.revisionId??x.edgeId??x.auditId??x.migrationId,x]));
+const collection=(v)=>v===null?{presence:"null",values:null}:Array.isArray(v)?{presence:"array",values:ids(v)}:{presence:"missing",values:null};
+const rev=(v={})=>({revisionId:v.revisionId,decisionInstanceId:v.decisionInstanceId,value:v.value,authority:v.authority,confirmation:v.confirmation,currentness:v.currentness,evidenceEdgeIds:ids(v.evidenceEdgeIds),dependsOnRevisionIds:ids(v.dependsOnRevisionIds),supersedesRevisionId:v.supersedesRevisionId??null});
+const claim=(v={})=>({claimId:v.claimId,claimTypeId:v.claimTypeId,sourceIds:ids(v.sourceIds),scopeKey:v.scopeKey,currentness:v.currentness,evidenceEdgeIds:ids(v.evidenceEdgeIds)});
+export function canonicalCapabilityKey(k){return {capabilityTypeId:k.capabilityTypeId,parentCapabilityInstanceId:k.parentCapabilityInstanceId??null,managedObjectIds:collection(k.managedObjectIds),actorIds:collection(k.actorIds),phaseKindId:k.phaseKindId??null};}
+export function canonicalDecisionKey(k,d=null){const x={decisionTypeId:k.decisionTypeId,capabilityInstanceId:k.capabilityInstanceId??null,managedObjectIds:collection(k.managedObjectIds),actorIds:collection(k.actorIds),phaseKindId:k.phaseKindId??null};if(!x.capabilityInstanceId&&d?.globalScopeAllowed!==true)throw new Error("decision scope requires a capability instance");return x;}
+export const capabilityInstanceId=(k)=>`cap:${hash(canonicalCapabilityKey(k))}`; export const decisionInstanceId=(k,d)=>`dec:${hash(canonicalDecisionKey(k,d))}`;
+const universal=UNIVERSAL_SLOT_TEMPLATES.map(slotTemplateId=>({slotTemplateId,slotClass:"universal",registryVersion:REGISTRY_VERSION_SET.slotTemplate}));
+export const DEFAULT_SLOT_REGISTRY=Object.freeze({registryVersion:REGISTRY_VERSION_SET.slotTemplate,semanticRegistryVersion:REGISTRY_VERSION_SET.coreUserValuePattern,slotTemplates:universal,coreUserValuePatterns:[]});
+export const EVIDENCE_RELATION_REGISTRY=Object.freeze(["explicitly_supports","explicitly_rejects","directly_entails"].map(relation=>({relation,sourceKind:"answer",targetKind:"requirement",maxDerivationDepth:relation==="directly_entails"?1:0,allowedSourceClassifications:["product_requirement"],allowedTargetClassifications:["product_requirement","implementation_constraint"]})));
+export function createArchitectureAuthority({registries={},revisions=[],evidenceEdges=[],targets=[],capabilities=[],coreInvariants=[],primaryFlows=[],claims=[],slots=[],coreUserValueMapping=null,audits=[],artifacts=[],dependencyEdges=[],migrations=[]}={}){return {registries:{relationRules:registries.relationRules??EVIDENCE_RELATION_REGISTRY,entailmentRules:registries.entailmentRules??[],transforms:registries.transforms??[],structuredSchemas:registries.structuredSchemas??[],slotRegistry:registries.slotRegistry??DEFAULT_SLOT_REGISTRY,claimTypes:registries.claimTypes??[],criticalityRules:registries.criticalityRules??[],registryVersionSet:registries.registryVersionSet??REGISTRY_VERSION_SET},ledgers:{revisions:map(revisions),evidenceEdges:map(evidenceEdges),targets:map(targets),capabilities:map(capabilities),coreInvariants:map(coreInvariants),primaryFlows:map(primaryFlows),claims:map(claims),slots:map(slots),audits:map(audits),artifacts:new Map(artifacts.map(x=>[`${x.kind}:${x.id}`,x])),dependencyEdges:[...dependencyEdges],migrations:map(migrations),coreUserValueMapping}};}
+export function createDecisionLedger(){return {revisions:new Map(),heads:new Map()};} export function appendDecisionRevision(l,r,{expectedCurrentRevisionId=null}={}){const h=l.heads.get(r.decisionInstanceId)??null;if(h!==expectedCurrentRevisionId||r.currentness!=="current"||(r.supersedesRevisionId&&r.supersedesRevisionId!==h)||r.supersedesRevisionId===r.revisionId||l.revisions.has(r.revisionId))throw new Error("invalid decision revision commit");if(h)l.revisions.set(h,{...l.revisions.get(h),currentness:"superseded"});l.revisions.set(r.revisionId,rev(r));l.heads.set(r.decisionInstanceId,r.revisionId);return r;}
+export function decisionProjection(l,instanceId,owningCapabilityActive=true){const r=l.revisions.get(l.heads.get(instanceId));if(!owningCapabilityActive)return "inactive";if(!r)return "unresolved";if(r.currentness==="stale"||r.dependsOnRevisionIds.some(id=>l.revisions.get(id)?.currentness==="stale"))return "stale";return r.authority==="delegated_to_system"?"delegated":"settled";}
+export function createTraitLedger(){return {revisions:new Map(),heads:new Map()};} export function appendTraitAssertion(l,a){const scope=`${a.traitId}:${a.scopeKey}`,h=l.heads.get(scope);if(a.currentness!=="current"||a.status==="superseded"||l.revisions.has(a.revisionId)||(a.supersedesAssertionId&&a.supersedesAssertionId!==h))throw new Error("invalid trait assertion commit");if(h)l.revisions.set(h,{...l.revisions.get(h),currentness:"superseded",status:"superseded"});l.revisions.set(a.revisionId,{...a,evidenceEdgeIds:ids(a.evidenceEdgeIds)});l.heads.set(scope,a.revisionId);return a;}
+export function validateEvidenceEdge({authority,edgeId}){const no=reason=>({accepted:false,reviewRequired:true,reason});const e=authority?.ledgers.evidenceEdges.get(edgeId);if(!e||e.currentness!=="current"||e.excluded||e.superseded)return no("missing_or_noncurrent_edge");const s=authority.ledgers.revisions.get(e.sourceRevisionId),t=authority.ledgers.targets.get(e.targetId);if(!s||s.currentness!=="current"||!t||t.currentness!=="current"||e.evidenceSpan!==s.evidenceText)return no("invalid_endpoint_or_span");if([...authority.ledgers.evidenceEdges.values()].some(x=>x.currentness==="current"&&x.excludesEdgeId===edgeId))return no("excluded_by_current_evidence");const r=authority.registries.relationRules.find(x=>x.relation===e.relation&&x.sourceKind===s.kind&&x.targetKind===t.kind);if(!r||e.targetScopeKey!==t.scopeKey||!r.allowedSourceClassifications?.includes(s.classification)||!r.allowedTargetClassifications?.includes(t.classification)||!Number.isInteger(e.derivationDepth)||e.derivationDepth<0||e.derivationDepth>r.maxDerivationDepth)return no("relation_scope_classification_or_depth");if(e.parentEdgeId&&authority.ledgers.evidenceEdges.get(e.parentEdgeId)?.currentness!=="current")return no("invalid_parent_edge");if(e.relation!=="directly_entails")return {accepted:true,edgeId};const entails=authority.registries.entailmentRules.some(x=>x.entailmentRuleId===e.entailmentRuleId&&x.sourceKind===s.kind&&x.targetKind===t.kind&&x.sourceValueSchemaId===s.valueSchemaId&&x.targetValueSchemaId===t.valueSchemaId&&x.maxDerivationDepth>=e.derivationDepth);const transformed=authority.registries.transforms.some(x=>x.transformId===e.transformId&&x.sourceKind===s.kind&&x.targetKind===t.kind&&x.maxDerivationDepth>=e.derivationDepth);const structured=authority.registries.structuredSchemas.some(x=>x.schemaId===s.valueSchemaId&&x.targetKinds?.includes(t.kind)&&x.validate?.(s.value)===true);return entails||transformed||structured?{accepted:true,edgeId}:no("unregistered_entailment");}
+function inspectSlots(a){const r=a?.registries.slotRegistry,m=a?.ledgers.coreUserValueMapping,errors=[];if(!r||r.registryVersion!==REGISTRY_VERSION_SET.slotTemplate||r.semanticRegistryVersion!==REGISTRY_VERSION_SET.coreUserValuePattern)errors.push("registry_version_mismatch");const ts=new Map((r?.slotTemplates??[]).map(x=>[x.slotTemplateId,x]));if(UNIVERSAL_SLOT_TEMPLATES.some(id=>ts.get(id)?.slotClass!=="universal"||ts.get(id)?.registryVersion!==r?.registryVersion))errors.push("missing_universal");const ps=new Map((r?.coreUserValuePatterns??[]).map(x=>[x.coreUserValuePatternId,x]));const wanted=m?.patternIds;if(!m||!["mapped","user_confirmed"].includes(m.status)||!Array.isArray(wanted)||!wanted.length)errors.push("unmapped_pattern");if((wanted??[]).some(id=>!ps.has(id)))errors.push("unknown_pattern");const uncovered=[...ps.values()].filter(p=>p.registryVersion!==r?.semanticRegistryVersion||!(p.requiredSlotTemplateIds??[]).length||(p.requiredSlotTemplateIds??[]).some(id=>ts.get(id)?.slotClass!=="core_value_pattern"||ts.get(id)?.registryVersion!==r?.registryVersion)).map(p=>p.coreUserValuePatternId);if(uncovered.length)errors.push("uncovered_pattern");return {r,ps,wanted:wanted??[],uncovered,errors};}
+export function generateCapabilitySlots({authority}){const x=inspectSlots(authority),patterns=x.wanted.map(id=>x.ps.get(id)).filter(Boolean);return ids([...UNIVERSAL_SLOT_TEMPLATES,...patterns.flatMap(p=>p.requiredSlotTemplateIds)]).map(slotTemplateId=>({slotInstanceId:`slot:${slotTemplateId}`,slotTemplateId,scopeKey:"global",status:"unknown"}));}
+export function slotRegistryCoverageProof({authority}){const x=inspectSlots(authority);return {registryVersion:x.r?.registryVersion??null,semanticRegistryVersion:x.r?.semanticRegistryVersion??null,coreUserValuePatternIds:ids(x.wanted),uncoveredPatternIds:ids(x.uncovered),errors:x.errors,complete:!x.errors.length};}
+export function capabilityCoverageProof({authority,requirementFingerprint}){const rc=slotRegistryCoverageProof({authority}),expected=generateCapabilitySlots({authority});const unknown=expected.filter(s=>{const v=authority.ledgers.slots.get(s.slotInstanceId);return !v||!["satisfied","explicitly_not_required","not_applicable"].includes(v.status)||(v.status==="not_applicable"&&!v.notApplicableRuleId);}).map(x=>x.slotInstanceId);const provisional=[...authority.ledgers.capabilities.values()].filter(x=>x.currentness==="current"&&x.blocking&&x.provisional).map(x=>x.id);return {requirementFingerprint,slotRegistryCoverageProofId:hash(rc),slotInstanceIds:ids(expected.map(x=>x.slotInstanceId)),unknownBlockingSlotIds:ids(unknown),provisionalBlockingCapabilityIds:ids(provisional),complete:rc.complete&&!unknown.length&&!provisional.length};}
+export function genericEnvelope({behaviorFamily,baselineEvaluated,blockingDecisionMapped,unresolvedGapBlocking}){return {behaviorFamily,completionContribution:false,mayPromoteToCapability:GenericBehaviorFamily.includes(behaviorFamily)&&baselineEvaluated===true&&blockingDecisionMapped===true&&unresolvedGapBlocking===false};}
+export function classifyRequirement({impacts={},aiCandidate=null}){const axis=["productVisibleState","actorOperation","requiredOutput","dataBoundary","primaryFlow","externalConsequence"].find(k=>impacts[k]===true);return axis?{classification:"product_requirement",resolverRuleId:`classification:${axis}`,provisional:false}:{classification:aiCandidate?"implementation_proposal":"implementation_constraint",resolverRuleId:"classification:non_product",provisional:Boolean(aiCandidate)};}
+export function resolveDelegation({candidates=[],valueSchemaValid,inScope,coreInvariantSafe,noBlockingConflict,introducesCapability,expandsExternalConsequence,expandsDataBoundary}){const safe=valueSchemaValid&&inScope&&coreInvariantSafe&&noBlockingConflict&&!introducesCapability&&!expandsExternalConsequence&&!expandsDataBoundary;return safe&&candidates.length===1?{settled:true,value:candidates[0],reason:"unique_safe_default"}:{settled:false,value:null,reason:!safe?"boundary_violation":candidates.length?"ambiguous_safe_default":"no_safe_default"};}
+export function requirementFingerprint(s){return hash({coreUserValue:s.coreUserValue?rev(s.coreUserValue):null,actors:ids(s.actors),managedObjects:ids(s.managedObjects),activeCapabilities:ids(s.activeCapabilities),traitHeads:ids(s.traitHeads),decisionRevisions:(s.decisionRevisions??[]).map(rev).sort((a,b)=>a.revisionId.localeCompare(b.revisionId)),openBlockingIssues:ids(s.openBlockingIssues),registryVersions:s.registryVersions});} export const claimSetFingerprint=({requirementFingerprint,claims=[],claimTypeRegistryVersion})=>hash({requirementFingerprint,claims:claims.map(claim).sort((a,b)=>a.claimId.localeCompare(b.claimId)),claimTypeRegistryVersion}); export const completionCandidateFingerprint=({requirementFingerprint,claimSetFingerprint,finalCoverageAuditId})=>hash({requirementFingerprint,claimSetFingerprint,finalCoverageAuditId});
+export function resolveCriticality({authority,decisionInstanceId,requirementFingerprint}){const d=authority?.ledgers.revisions.get(decisionInstanceId),r=d&&authority.registries.criticalityRules.find(x=>x.ruleId===d.criticalityRuleId);return {decisionInstanceId,blocking:r?.evaluate?.(d)===true,resolverRuleId:r?.ruleId??"criticality:no_registered_rule",requirementFingerprint};}
+export function validateArtifactDag(edges){const kinds=new Set(["semantic","scope","classification","grounding","coverage","generation"]),a=new Map(),nodes=new Set();for(const e of edges){if(!e.fromArtifactKind||!e.fromArtifactId||!e.toArtifactKind||!e.toArtifactId||!kinds.has(e.dependencyKind))throw new Error("invalid artifact dependency edge");const f=`${e.fromArtifactKind}:${e.fromArtifactId}`,t=`${e.toArtifactKind}:${e.toArtifactId}`;nodes.add(f);nodes.add(t);a.set(f,[...(a.get(f)??[]),t]);}const visiting=new Set(),seen=new Set(),walk=n=>{if(visiting.has(n))throw new Error("artifact dependency cycle");if(seen.has(n))return;visiting.add(n);for(const q of a.get(n)??[])walk(q);visiting.delete(n);seen.add(n);};for(const n of nodes)walk(n);return true;}
+export function propagateStaleTransaction({authority,changedArtifactId,reevaluate=()=>true}){const edges=authority.ledgers.dependencyEdges;validateArtifactDag(edges);if(!authority.ledgers.artifacts.has(changedArtifactId))throw new Error("unknown changed artifact");const down=new Map();for(const e of edges){const f=`${e.fromArtifactKind}:${e.fromArtifactId}`,t=`${e.toArtifactKind}:${e.toArtifactId}`;down.set(f,[...(down.get(f)??[]),t]);}const stale=new Set([changedArtifactId]),q=[changedArtifactId];while(q.length)for(const n of down.get(q.shift())??[])if(!stale.has(n)){stale.add(n);q.push(n);}const staged=new Map(authority.ledgers.artifacts);for(const id of stale){if(!staged.has(id))throw new Error("dependency references unknown artifact");staged.set(id,{...staged.get(id),currentness:"stale"});}if(reevaluate(staged,ids([...stale]))!==true)throw new Error("stale propagation reevaluation failed");authority.ledgers.artifacts=staged;return ids([...stale]);}
+function sources(a){const out=[];for(const x of a.ledgers.capabilities.values())if(x.currentness==="current"&&x.blocking)out.push({kind:"capability",id:x.id,scopeKey:x.scopeKey});for(const x of a.ledgers.revisions.values())if(x.currentness==="current"&&x.classification==="product_requirement"&&["settled","delegated"].includes(x.settlement))out.push({kind:"decision",id:x.revisionId,scopeKey:x.scopeKey});for(const x of a.ledgers.coreInvariants.values())if(x.currentness==="current")out.push({kind:"core_invariant",id:x.id,scopeKey:x.scopeKey});for(const x of a.ledgers.primaryFlows.values())if(x.currentness==="current")out.push({kind:"primary_flow",id:x.id,scopeKey:x.scopeKey});return out;}
+export function claimCoverageProof({authority,claimSetFingerprint}){const ss=sources(authority),types=authority.registries.claimTypes,cs=[...authority.ledgers.claims.values()],entries=ss.map(s=>({sourceKind:s.kind,sourceId:s.id,representedByClaimIds:cs.filter(c=>c.currentness==="current"&&c.sourceIds?.includes(s.id)&&c.scopeKey===s.scopeKey&&types.some(t=>t.claimTypeId===c.claimTypeId&&t.required&&t.sourceKinds?.includes(s.kind))&&c.evidenceEdgeIds?.length&&c.evidenceEdgeIds.every(edgeId=>validateEvidenceEdge({authority,edgeId}).accepted)).map(c=>c.claimId)}));const bad=cs.filter(c=>c.currentness!=="current"||!types.some(t=>t.claimTypeId===c.claimTypeId&&t.required)||!c.evidenceEdgeIds?.length||!c.evidenceEdgeIds.every(edgeId=>validateEvidenceEdge({authority,edgeId}).accepted)).map(c=>c.claimId);return {claimSetFingerprint,entries,uncoveredBlockingSourceIds:entries.filter(x=>!x.representedByClaimIds.length).map(x=>x.sourceId),invalidClaimIds:bad,complete:!bad.length&&entries.every(x=>x.representedByClaimIds.length)};}
+export function auditTerminalState({authority,auditId,requirementFingerprint}){const a=authority?.ledgers.audits.get(auditId);if(!a||a.currentness!=="current"||a.requirementFingerprint!==requirementFingerprint||!Number.isInteger(a.attempts)||a.attempts<1||!Number.isInteger(a.maxAttempts)||a.maxAttempts<a.attempts)return {state:"failed_terminal",reason:"missing_or_invalid_audit"};if(a.errorKind||a.outcome!=="passed")return {state:a.attempts>=a.maxAttempts?"inconclusive_limit_reached":"failed_retryable",reason:a.errorKind??a.outcome};if(a.blockingGapIds?.length||!Array.isArray(a.rejectedGapFingerprints)||(a.proposedGapFingerprint&&a.rejectedGapFingerprints.includes(a.proposedGapFingerprint)))return {state:"failed_terminal",reason:"unresolved_or_repeated_gap"};return {state:"passed",auditId};}
+export function validateSpecClaimConformance({authority,specElements=[]}){const invalidElementIds=specElements.filter(e=>REQUIRED_SPEC_ELEMENT_KINDS.includes(e.kind)&&(!e.sourceClaimIds?.length||!e.sourceClaimIds.every(id=>authority.ledgers.claims.get(id)?.currentness==="current"))).map(e=>e.id);return {invalidElementIds,complete:!invalidElementIds.length};}
+export function migrateV4Context({authority,source,registryVersionSet}){const sourceFactFingerprint=hash((source.facts??[]).map(f=>({key:f.key,source:f.source,revisionId:f.revisionId??null,value:f.value}))),migrationId=hash({sourceFactFingerprint,target:"v5",registryVersionSet}),existing=authority.ledgers.migrations.get(migrationId);if(existing)return {record:existing,projection:existing.projection,created:false};for(const x of authority.ledgers.migrations.values())if(x.sourceFactFingerprint===sourceFactFingerprint&&x.targetContextVersion==="v5"&&x.migrationStatus==="current")authority.ledgers.migrations.set(x.migrationId,{...x,migrationStatus:"superseded"});const projection={userConfirmedRevisions:(source.facts??[]).filter(f=>f.source==="user_confirmed").map(f=>({revisionId:f.revisionId??f.key,authority:f.authority??"user",confirmation:f.confirmation??"explicitly_confirmed"})),legacyGeneratedArtifacts:source.generatedSpec?[{kind:"legacy_generated_artifact",value:source.generatedSpec}]:[]};const record={migrationId,sourceContextVersion:source.version??"v4",targetContextVersion:"v5",sourceFactFingerprint,registryVersionSet,migrationStatus:"current",migrationWarnings:[],projection};authority.ledgers.migrations.set(migrationId,record);return {record,projection,created:true};}
+export function currentMigrationProjection({authority,sourceFactFingerprint}){const x=[...authority.ledgers.migrations.values()].filter(m=>m.sourceFactFingerprint===sourceFactFingerprint&&m.targetContextVersion==="v5"&&m.migrationStatus==="current");if(x.length!==1)throw new Error("migration current projection is not unique");return x[0].projection;}
