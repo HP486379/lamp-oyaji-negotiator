@@ -1,16 +1,18 @@
 /**
- * v5 PR0 executable architecture contracts.
+ * v5 PR0 — Contract Kernel / Verifier.
  *
- * Public callers submit raw user/audit/migration requests only.  Semantic
- * adapters, rules, evidence, registries, and proofs are module-private.
+ * This module deliberately does not interpret natural language or produce
+ * semantic requirements. Production callers may submit raw events, but no raw
+ * event can become Evidence, a settled Slot, a Claim, or Completion until a
+ * later PR connects registered semantic producers to this verifier.
  */
 import { createHash } from "node:crypto";
 
 export const REGISTRY_VERSION_SET = Object.freeze({
-  decisionType: "v5-pr0.3", capabilityType: "v5-pr0.3", trait: "v5-pr0.3",
-  coreUserValuePattern: "v5-pr0.3", slotTemplate: "v5-pr0.3",
-  criticalityRule: "v5-pr0.3", claimType: "v5-pr0.3", auditRule: "v5-pr0.3",
-  migrationAdapter: "v5-pr0.3",
+  decisionType: "v5-pr0.4", capabilityType: "v5-pr0.4", trait: "v5-pr0.4",
+  coreUserValuePattern: "v5-pr0.4", slotTemplate: "v5-pr0.4",
+  criticalityRule: "v5-pr0.4", claimType: "v5-pr0.4", auditRule: "v5-pr0.4",
+  migrationAdapter: "v5-pr0.4",
 });
 export const UNIVERSAL_SLOT_TEMPLATES = Object.freeze([
   "actor_participation", "primary_interaction", "required_input", "required_output",
@@ -21,6 +23,8 @@ export const REQUIRED_SPEC_ELEMENT_KINDS = Object.freeze([
   "acceptance_criteria", "primary_flow_step", "required_product_paragraph",
 ]);
 
+const PRIVATE = new WeakMap();
+const KERNEL = new WeakMap();
 const stable = (value) => {
   if (Array.isArray(value)) return value.map(stable);
   if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
@@ -28,272 +32,200 @@ const stable = (value) => {
 };
 const hash = (value) => createHash("sha256").update(JSON.stringify(stable(value))).digest("hex");
 const uniqueSorted = (values = []) => [...new Set(values ?? [])].sort();
-const deepFreeze = (value) => {
-  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
-  Object.freeze(value); for (const child of Object.values(value)) deepFreeze(child); return value;
-};
+const freeze = (value) => Object.freeze(value);
+const asArray = (value) => Array.isArray(value) ? value : [];
+const byId = (items) => new Map(asArray(items).map((item) => [item.id, item]));
+const current = (item) => item?.currentness === "current";
 const collection = (value) => value === null ? { presence: "null", values: null } : Array.isArray(value) ? { presence: "array", values: uniqueSorted(value) } : { presence: "missing", values: null };
+const result = (errors, details = {}) => freeze({ eligible: errors.length === 0, status: errors.length ? "blocked_invariant" : "eligible", errors: uniqueSorted(errors), ...details });
 
 export function canonicalCapabilityKey(key) {
   return { capabilityTypeId: key.capabilityTypeId, parentCapabilityInstanceId: key.parentCapabilityInstanceId ?? null, managedObjectIds: collection(key.managedObjectIds), actorIds: collection(key.actorIds), phaseKindId: key.phaseKindId ?? null };
 }
 export function canonicalDecisionKey(key, definition = null) {
-  const result = { decisionTypeId: key.decisionTypeId, capabilityInstanceId: key.capabilityInstanceId ?? null, managedObjectIds: collection(key.managedObjectIds), actorIds: collection(key.actorIds), phaseKindId: key.phaseKindId ?? null };
-  if (!result.capabilityInstanceId && definition?.globalScopeAllowed !== true) throw new Error("decision scope requires a capability instance");
-  return result;
+  const value = { decisionTypeId: key.decisionTypeId, capabilityInstanceId: key.capabilityInstanceId ?? null, managedObjectIds: collection(key.managedObjectIds), actorIds: collection(key.actorIds), phaseKindId: key.phaseKindId ?? null };
+  if (!value.capabilityInstanceId && definition?.globalScopeAllowed !== true) throw new Error("decision scope requires a capability instance");
+  return value;
 }
 export const capabilityInstanceId = (key) => `cap:${hash(canonicalCapabilityKey(key))}`;
 export const decisionInstanceId = (key, definition) => `dec:${hash(canonicalDecisionKey(key, definition))}`;
 
-const QUESTION_CONTRACTS = deepFreeze({
-  actor_participation: { answerSchemaId: "enum_actor", allowedValues: ["single_actor", "multiple_actors"], semanticValidatorId: "known_enum_value" },
-  primary_interaction: { answerSchemaId: "enum_interaction", allowedValues: ["select", "create"], semanticValidatorId: "known_enum_value" },
-  required_input: { answerSchemaId: "meaningful_text", allowedValues: null, semanticValidatorId: "meaningful_text" },
-  required_output: { answerSchemaId: "meaningful_text", allowedValues: null, semanticValidatorId: "meaningful_text" },
-  success_observability: { answerSchemaId: "boolean", allowedValues: ["true", "false"], semanticValidatorId: "strict_boolean" },
-  state_continuity: { answerSchemaId: "integer", allowedValues: null, semanticValidatorId: "strict_integer" },
-  external_boundary: { answerSchemaId: "enum_boundary", allowedValues: ["local", "external"], semanticValidatorId: "known_enum_value" },
-  failure_observability: { answerSchemaId: "enum_failure", allowedValues: ["visible", "silent"], semanticValidatorId: "known_enum_value" },
-  pattern_primary_capability: { answerSchemaId: "meaningful_text", allowedValues: null, semanticValidatorId: "meaningful_text" },
-});
-const SLOT_REGISTRY = deepFreeze({
-  registryVersion: REGISTRY_VERSION_SET.slotTemplate,
-  semanticRegistryVersion: REGISTRY_VERSION_SET.coreUserValuePattern,
-  patternId: "pr0_interactive_value",
-  slots: [...UNIVERSAL_SLOT_TEMPLATES, "pattern_primary_capability"].map((slotTemplateId) => ({ slotTemplateId, ...QUESTION_CONTRACTS[slotTemplateId], evidenceMappingRuleId: "validated_answer_to_issued_target", satisfactionRuleId: "validated_evidence_for_matching_slot", registryVersion: REGISTRY_VERSION_SET.slotTemplate })),
-});
-const REGISTRIES = deepFreeze({
-  slotRegistry: SLOT_REGISTRY,
-  criticalityRules: [{ ruleId: "slot_decision_required", blocking: true }],
-  auditExecutor: { id: "coverage-audit-v1", version: "1" },
-  auditRule: { id: "final-coverage-v1" },
-  migrationAdapter: { id: "v4-authoritative-export-v1", sourceContextVersion: "v4" },
-});
-const PRIVATE = new WeakMap();
-const internal = (authority) => {
+/** Raw-event ingress has no semantic side effects in PR0. */
+export function createArchitectureAuthority() {
+  const authority = freeze({ kind: "v5-pr0-contract-authority", version: "pr0.4" });
+  PRIVATE.set(authority, { rawEvents: new Map() });
+  return authority;
+}
+const internalAuthority = (authority) => {
   const state = PRIVATE.get(authority);
   if (!state) throw new Error("invalid architecture authority handle");
   return state;
 };
-const eventDigest = (event) => hash({ eventId: event.eventId, type: event.type, text: event.text ?? "", questionId: event.questionId ?? null, sourceId: event.sourceId ?? null });
-const newState = () => ({
-  registries: REGISTRIES, rawEvents: new Map(), answerAssessments: new Map(), revisions: new Map(), evidence: new Map(),
-  targets: new Map(), slots: new Map(), questions: new Map(), capabilities: new Map(), decisions: new Map(),
-  claims: new Map(), audits: new Map(), artifacts: new Map(), coreUserValue: null, coreUserValueMapping: null,
-  coreInvariant: null, primaryFlow: null, migrationRequests: new Map(), revisionHeads: new Map(),
-});
-export function createArchitectureAuthority() {
-  const authority = Object.freeze({ kind: "v5-architecture-authority", version: "pr0.3" });
-  PRIVATE.set(authority, newState());
-  return authority;
-}
-
-const recordRawEvent = (state, event) => {
+const rawDigest = (event) => hash({ eventId: event.eventId, type: event.type, text: event.text ?? "", questionId: event.questionId ?? null, sourceId: event.sourceId ?? null });
+const recordRaw = (authority, event, type) => {
+  const state = internalAuthority(authority);
   if (!event || typeof event.eventId !== "string" || !event.eventId || typeof event.text !== "string") throw new Error("invalid raw event");
-  const digest = eventDigest(event); const prior = state.rawEvents.get(event.eventId);
-  if (prior) {
-    if (prior.digest !== digest) throw new Error("raw event replay was modified");
-    return { replay: true, event: prior };
-  }
-  const stored = deepFreeze({ eventId: event.eventId, type: event.type, text: event.text, questionId: event.questionId ?? null, sourceId: event.sourceId ?? null, digest });
-  state.rawEvents.set(stored.eventId, stored); return { replay: false, event: stored };
+  const stored = freeze({ eventId: event.eventId, type, text: event.text, questionId: event.questionId ?? null, sourceId: event.sourceId ?? null, digest: rawDigest({ ...event, type }) });
+  const prior = state.rawEvents.get(stored.eventId);
+  if (prior && prior.digest !== stored.digest) throw new Error("raw event replay was modified");
+  if (!prior) state.rawEvents.set(stored.eventId, stored);
+  return { accepted: true, replay: Boolean(prior), status: "blocked_missing_authority", reasonCodes: ["semantic_authority_unavailable"] };
 };
-const assessRawAnswer = (question, text) => {
-  const syntaxValid = typeof text === "string" && text.trim().length > 0;
-  if (!syntaxValid) return { syntaxValid: false, schemaValid: false, semanticallyValid: false, reason: "empty_or_whitespace" };
-  const value = text.trim(); const contract = question.answerContract;
-  let schemaValid = false;
-  if (contract.answerSchemaId === "meaningful_text") schemaValid = value.length >= 2 && /[\p{L}\p{N}]/u.test(value);
-  else if (contract.answerSchemaId === "integer") schemaValid = /^-?\d+$/.test(value);
-  else if (contract.answerSchemaId === "boolean") schemaValid = contract.allowedValues.includes(value);
-  else if (contract.answerSchemaId.startsWith("enum_")) schemaValid = contract.allowedValues.includes(value);
-  const semanticallyValid = schemaValid && contract.semanticValidatorId !== "meaningful_text" || (schemaValid && !["x", "n/a", "none", "不明", "-"].includes(value.toLowerCase()));
-  return { syntaxValid, schemaValid, semanticallyValid, reason: semanticallyValid ? null : "answer_contract_rejected", normalizedValue: value };
-};
-const assessInitialInput = (text) => typeof text === "string" && text.trim().length >= 2 && /[\p{L}\p{N}]/u.test(text);
-const addTarget = (state, id, scopeKey, slotTemplateId = null) => state.targets.set(id, deepFreeze({ id, scopeKey, slotTemplateId, currentness: "current" }));
-const addEvidence = (state, { id, revisionId, targetId, event }) => {
-  const revision = state.revisions.get(revisionId); const target = state.targets.get(targetId);
-  if (!revision || revision.currentness !== "current" || !target || target.currentness !== "current" || revision.sourceEventId !== event.eventId || revision.text !== event.text || revision.scopeKey !== target.scopeKey) throw new Error("internal evidence validation failed");
-  state.evidence.set(id, deepFreeze({ id, revisionId, targetId, sourceEventId: event.eventId, span: event.text, relation: "explicitly_states", derivationDepth: 0, currentness: "current" }));
-  return id;
-};
-const currentEvidence = (state, evidenceId, targetId = null) => {
-  const edge = state.evidence.get(evidenceId); const revision = edge && state.revisions.get(edge.revisionId);
-  return Boolean(edge && edge.currentness === "current" && revision?.currentness === "current" && (!targetId || edge.targetId === targetId));
-};
-const staleDownstream = (state, revisionId) => {
-  for (const artifact of state.artifacts.values()) if (artifact.revisionId === revisionId || artifact.dependsOnRevisionId === revisionId) artifact.currentness = "stale";
-  for (const claim of state.claims.values()) if (claim.revisionId === revisionId) claim.currentness = "stale";
-  for (const decision of state.decisions.values()) if (decision.revisionId === revisionId) decision.currentness = "stale";
-};
-const addClaim = (state, source) => {
-  const claimId = `claim:${source.id}`;
-  const edge = state.evidence.get(source.evidenceId);
-  if (!currentEvidence(state, source.evidenceId, source.targetId)) throw new Error("internal claim grounding failed");
-  state.claims.set(claimId, { id: claimId, sourceId: source.id, sourceKind: source.kind, targetId: source.targetId, evidenceId: edge.id, revisionId: edge.revisionId, scopeKey: source.scopeKey, currentness: "current" });
-  state.artifacts.set(`claim:${claimId}`, { id: `claim:${claimId}`, dependsOnRevisionId: edge.revisionId, blocking: true, currentness: "current" });
-};
-const evaluateSlotSatisfaction = (state, question, assessment, evidenceId) => {
-  const definition = state.registries.slotRegistry.slots.find((item) => item.slotTemplateId === question.slotTemplateId);
-  const accepted = Boolean(definition && definition.satisfactionRuleId === "validated_evidence_for_matching_slot" && definition.evidenceMappingRuleId === "validated_answer_to_issued_target" && assessment.semanticallyValid && currentEvidence(state, evidenceId, question.targetId));
-  if (accepted) state.slots.set(question.slotTemplateId, { slotTemplateId: question.slotTemplateId, status: "satisfied", evidenceId, currentness: "current" });
-  return accepted;
-};
-const activateCapabilityForSatisfiedSlot = (state, question, revision, evidenceId) => {
-  const slot = state.slots.get(question.slotTemplateId);
-  if (slot?.status !== "satisfied" || slot.evidenceId !== evidenceId) return null;
-  const capId = `cap:${question.slotTemplateId}`; const decisionId = `decision:${question.slotTemplateId}`;
-  const previous = state.revisionHeads.get(question.slotTemplateId);
-  if (previous && previous !== revision.id) staleDownstream(state, previous);
-  state.revisionHeads.set(question.slotTemplateId, revision.id);
-  state.capabilities.set(capId, { id: capId, targetId: question.targetId, evidenceId, revisionId: revision.id, scopeKey: question.scopeKey, currentness: "current", blocking: true, provisional: false });
-  state.decisions.set(decisionId, { id: decisionId, revisionId: revision.id, targetId: question.targetId, evidenceId, scopeKey: question.scopeKey, currentness: "current" });
-  state.artifacts.set(`capability:${capId}`, { id: `capability:${capId}`, revisionId: revision.id, blocking: true, currentness: "current" });
-  state.artifacts.set(`decision:${decisionId}`, { id: `decision:${decisionId}`, revisionId: revision.id, blocking: true, currentness: "current" });
-  return { capId, decisionId };
-};
-const settleDecisionFromActivatedCapability = (state, ids) => {
-  if (!ids) return false;
-  const capability = state.capabilities.get(ids.capId); const decision = state.decisions.get(ids.decisionId);
-  return Boolean(capability?.currentness === "current" && !capability.provisional && decision?.currentness === "current" && currentEvidence(state, decision.evidenceId, decision.targetId));
-};
-const deriveClaimsFromSettledState = (state, ids) => {
-  if (!ids || !settleDecisionFromActivatedCapability(state, ids)) return;
-  const capability = state.capabilities.get(ids.capId); const decision = state.decisions.get(ids.decisionId);
-  addClaim(state, { id: capability.id, kind: "capability", targetId: capability.targetId, evidenceId: capability.evidenceId, scopeKey: capability.scopeKey });
-  addClaim(state, { id: decision.id, kind: "decision", targetId: decision.targetId, evidenceId: decision.evidenceId, scopeKey: decision.scopeKey });
-};
-const initializeQuestions = (state) => {
-  for (const definition of state.registries.slotRegistry.slots) {
-    const questionId = `question:${definition.slotTemplateId}`; const targetId = `target:${definition.slotTemplateId}`;
-    addTarget(state, targetId, "global", definition.slotTemplateId);
-    state.questions.set(questionId, deepFreeze({ id: questionId, targetId, slotTemplateId: definition.slotTemplateId, decisionTypeId: `decision:${definition.slotTemplateId}`, answerSchemaId: definition.answerSchemaId, semanticValidatorId: definition.semanticValidatorId, evidenceMappingRuleId: definition.evidenceMappingRuleId, satisfactionRuleId: definition.satisfactionRuleId, answerContract: definition, scopeKey: "global", answeredByEventId: null }));
-    state.slots.set(definition.slotTemplateId, { slotTemplateId: definition.slotTemplateId, status: "unknown", evidenceId: null, currentness: "current" });
-  }
-};
-export function submitRawInitialInput({ authority, event }) {
-  const state = internal(authority); const raw = { ...event, type: "initial_input", questionId: null };
-  const recorded = recordRawEvent(state, raw); if (recorded.replay) return { accepted: true, replay: true };
-  if (state.coreUserValue || [...state.rawEvents.values()].some((item) => item.type === "initial_input" && item.eventId !== raw.eventId)) throw new Error("initial input is already recorded");
-  initializeQuestions(state);
-  if (!assessInitialInput(raw.text)) {
-    state.answerAssessments.set(raw.eventId, { eventId: raw.eventId, stage: "semantically_invalid", reason: "invalid_core_user_value" });
-    return { accepted: true, replay: false, semanticallyValid: false };
-  }
-  const revisionId = `revision:initial:${raw.eventId}`; const targetId = `target:core:${raw.eventId}`; const evidenceId = `evidence:core:${raw.eventId}`;
-  state.revisions.set(revisionId, { id: revisionId, sourceEventId: raw.eventId, text: raw.text, scopeKey: "core", currentness: "current", adapterVersion: "initial_input_adapter@1" });
-  addTarget(state, targetId, "core"); addEvidence(state, { id: evidenceId, revisionId, targetId, event: raw });
-  state.coreUserValue = { revisionId, targetId, evidenceId, value: raw.text, currentness: "current" };
-  state.coreUserValueMapping = { patternId: state.registries.slotRegistry.patternId, evidenceId, currentness: "current" };
-  state.coreInvariant = { id: "invariant:core", targetId, evidenceId, revisionId, scopeKey: "core", currentness: "current" };
-  state.primaryFlow = { id: "flow:core", targetId, evidenceId, revisionId, scopeKey: "core", currentness: "current" };
-  state.artifacts.set("invariant:core", { id: "invariant:core", revisionId, blocking: true, currentness: "current" });
-  state.artifacts.set("flow:core", { id: "flow:core", revisionId, blocking: true, currentness: "current" });
-  addClaim(state, { id: "invariant:core", kind: "core_invariant", targetId, evidenceId, scopeKey: "core" });
-  addClaim(state, { id: "flow:core", kind: "primary_flow", targetId, evidenceId, scopeKey: "core" });
-  return { accepted: true, replay: false, semanticallyValid: true };
+export const submitRawInitialInput = ({ authority, event }) => recordRaw(authority, event, "initial_input");
+export const submitRawUserAnswer = ({ authority, event }) => recordRaw(authority, event, "user_answer");
+export const submitExplicitUserConfirmation = ({ authority, event }) => recordRaw(authority, event, "user_confirmation");
+export const listPendingQuestions = ({ authority }) => { internalAuthority(authority); return []; };
+export function productionCompletionStatus({ authority }) {
+  internalAuthority(authority);
+  return freeze({ eligible: false, status: "blocked_missing_authority", reasonCodes: ["semantic_authority_unavailable", "registered_registry_unavailable", "registered_rule_engine_unavailable", "registered_audit_executor_unavailable"] });
 }
-export function listPendingQuestions({ authority }) {
-  const state = internal(authority);
-  return [...state.questions.values()].filter((question) => !question.answeredByEventId).map((question) => ({ questionId: question.id, decisionTypeId: question.decisionTypeId, slotTemplateId: question.slotTemplateId, answerSchemaId: question.answerSchemaId, allowedValues: question.answerContract.allowedValues, semanticValidatorId: question.semanticValidatorId, evidenceMappingRuleId: question.evidenceMappingRuleId, satisfactionRuleId: question.satisfactionRuleId, scope: question.scopeKey }));
+export const provisionalCompletionProof = ({ authority }) => productionCompletionStatus({ authority });
+export const finalCompletionProof = ({ authority }) => productionCompletionStatus({ authority });
+export const requestAuditExecution = ({ authority }) => productionCompletionStatus({ authority });
+export const auditTerminalState = ({ authority }) => productionCompletionStatus({ authority });
+export const requestMigration = ({ authority }) => productionCompletionStatus({ authority });
+export const currentMigrationProjection = ({ authority }) => { internalAuthority(authority); return null; };
+
+/** Canonical, phase-separated fingerprints for semantic artifacts from future producers. */
+export function requirementFingerprint(state) {
+  return hash({
+    coreUserValue: state.coreUserValue ? { revisionId: state.coreUserValue.revisionId, value: state.coreUserValue.value, patternId: state.coreUserValue.patternId } : null,
+    actors: asArray(state.actors).filter(current).map(stable).sort((a, b) => a.id.localeCompare(b.id)),
+    managedObjects: asArray(state.managedObjects).filter(current).map(stable).sort((a, b) => a.id.localeCompare(b.id)),
+    capabilities: asArray(state.capabilities).filter(current).map((item) => ({ id: item.id, key: item.key, scopeKey: item.scopeKey, evidenceId: item.evidenceId })).sort((a, b) => a.id.localeCompare(b.id)),
+    traits: asArray(state.traits).filter(current).map((item) => ({ id: item.id, value: item.value, scopeKey: item.scopeKey })).sort((a, b) => a.id.localeCompare(b.id)),
+    decisionRevisions: asArray(state.decisionRevisions).filter(current).map((item) => ({ id: item.id, instanceId: item.instanceId, value: item.value, scopeKey: item.scopeKey })).sort((a, b) => a.id.localeCompare(b.id)),
+    openBlockingIssues: asArray(state.issues).filter((item) => current(item) && item.blocking).map((item) => ({ id: item.id, kind: item.kind, scopeKey: item.scopeKey })).sort((a, b) => a.id.localeCompare(b.id)),
+    registryVersions: state.registry?.versionSet ?? null,
+  });
 }
-export function submitRawUserAnswer({ authority, event }) {
-  const state = internal(authority); const raw = { ...event, type: "user_answer" };
-  const recorded = recordRawEvent(state, raw); if (recorded.replay) return { accepted: true, replay: true, assessment: state.answerAssessments.get(raw.eventId) ?? null };
-  const question = state.questions.get(raw.questionId);
-  if (!question) throw new Error("unknown issued question");
-  const previousEvent = question.answeredByEventId;
-  if (previousEvent && previousEvent !== raw.eventId) throw new Error("issued question already has a current answer");
-  const assessment = assessRawAnswer(question, raw.text);
-  state.answerAssessments.set(raw.eventId, { eventId: raw.eventId, questionId: question.id, stage: assessment.semanticallyValid ? "semantically_valid" : assessment.schemaValid ? "schema_valid" : assessment.syntaxValid ? "syntax_valid" : "received", ...assessment });
-  if (!assessment.semanticallyValid) return { accepted: true, replay: false, evidenceAccepted: false, assessment: state.answerAssessments.get(raw.eventId) };
-  const revisionId = `revision:answer:${raw.eventId}`; const evidenceId = `evidence:answer:${raw.eventId}`;
-  const revision = { id: revisionId, sourceEventId: raw.eventId, text: raw.text, scopeKey: question.scopeKey, currentness: "current", adapterVersion: "user_answer_adapter@1" };
-  state.revisions.set(revisionId, revision); addEvidence(state, { id: evidenceId, revisionId, targetId: question.targetId, event: raw });
-  const accepted = evaluateSlotSatisfaction(state, question, assessment, evidenceId);
-  if (!accepted) return { accepted: true, replay: false, evidenceAccepted: false, assessment: state.answerAssessments.get(raw.eventId) };
-  state.answerAssessments.set(raw.eventId, { ...state.answerAssessments.get(raw.eventId), stage: "evidence_accepted" });
-  state.questions.set(question.id, { ...question, answeredByEventId: raw.eventId });
-  const ids = activateCapabilityForSatisfiedSlot(state, question, revision, evidenceId);
-  deriveClaimsFromSettledState(state, ids);
-  return { accepted: true, replay: false, evidenceAccepted: true, assessment: state.answerAssessments.get(raw.eventId) };
+export function claimSetFingerprint(state) {
+  return hash({ requirementFingerprint: requirementFingerprint(state), claimTypeRegistryVersion: state.registry?.versionSet?.claimType ?? null, claims: asArray(state.claims).filter(current).map((item) => ({ id: item.id, sourceId: item.sourceId, typeId: item.typeId, evidenceId: item.evidenceId, scopeKey: item.scopeKey })).sort((a, b) => a.id.localeCompare(b.id)) });
 }
-export function submitExplicitUserConfirmation({ authority, event }) {
-  const state = internal(authority); const raw = { ...event, type: "user_confirmation", questionId: null };
-  const recorded = recordRawEvent(state, raw); if (recorded.replay) return { accepted: true, replay: true };
-  return { accepted: true, replay: false, confirmationId: raw.eventId };
+export const completionCandidateFingerprint = (state, auditId) => hash({ requirementFingerprint: requirementFingerprint(state), claimSetFingerprint: claimSetFingerprint(state), auditId });
+
+const ruleIds = (registry) => new Set(asArray(registry?.rules).map((item) => item.id));
+const registryVersionsMatch = (versionSet) => JSON.stringify(stable(versionSet)) === JSON.stringify(stable(REGISTRY_VERSION_SET));
+export function validateRegistryContext(registry) {
+  const errors = [];
+  if (!registry || !registryVersionsMatch(registry.versionSet)) errors.push("registry_version_mismatch");
+  const slotIds = new Set(asArray(registry?.slotTemplates).map((item) => item.slotTemplateId));
+  for (const id of UNIVERSAL_SLOT_TEMPLATES) if (!slotIds.has(id)) errors.push(`missing_universal_slot:${id}`);
+  const rules = ruleIds(registry);
+  for (const slot of asArray(registry?.slotTemplates)) if (!slot.satisfactionRuleId || !rules.has(slot.satisfactionRuleId)) errors.push(`unresolved_satisfaction_rule:${slot.slotTemplateId ?? "unknown"}`);
+  const patternIds = new Set(asArray(registry?.coreUserValuePatterns).map((item) => item.id));
+  if (!patternIds.size) errors.push("missing_core_user_value_pattern_registry");
+  for (const pattern of asArray(registry?.coreUserValuePatterns)) for (const id of [...asArray(pattern.universalSlotTemplateIds), ...asArray(pattern.patternSlotTemplateIds)]) if (!slotIds.has(id)) errors.push(`uncovered_pattern_slot:${pattern.id}:${id}`);
+  if (!asArray(registry?.claimTypes).length) errors.push("missing_claim_type_registry");
+  if (!asArray(registry?.auditExecutors).length) errors.push("missing_audit_executor_registry");
+  if (!asArray(registry?.allowedEvidenceRelations).length) errors.push("missing_evidence_relation_registry");
+  return result(errors, { registryFingerprint: hash(registry ?? null) });
 }
 
-const currentSources = (state) => [
-  ...[...state.capabilities.values()].filter((item) => item.currentness === "current").map((item) => ({ id: item.id, kind: "capability", ...item })),
-  ...[...state.decisions.values()].filter((item) => item.currentness === "current").map((item) => ({ id: item.id, kind: "decision", ...item })),
-  ...(state.coreInvariant?.currentness === "current" ? [{ ...state.coreInvariant, kind: "core_invariant" }] : []),
-  ...(state.primaryFlow?.currentness === "current" ? [{ ...state.primaryFlow, kind: "primary_flow" }] : []),
+export function validateRevisionInvariants({ revisions, dependencies = [] }) {
+  const errors = []; const heads = new Map();
+  for (const revision of asArray(revisions)) {
+    if (!revision.id || !revision.instanceId) errors.push("invalid_revision_identity");
+    if (current(revision)) heads.set(revision.instanceId, [...(heads.get(revision.instanceId) ?? []), revision.id]);
+    if (revision.supersedesRevisionId && revision.supersedesRevisionId === revision.id) errors.push(`revision_self_supersede:${revision.id}`);
+  }
+  for (const [instanceId, ids] of heads) if (ids.length !== 1) errors.push(`multiple_current_heads:${instanceId}`);
+  const graph = new Map();
+  for (const edge of asArray(dependencies)) { if (!edge.fromId || !edge.toId) errors.push("invalid_dependency_edge"); graph.set(edge.fromId, [...(graph.get(edge.fromId) ?? []), edge.toId]); }
+  const visiting = new Set(); const visited = new Set();
+  const visit = (node) => { if (visiting.has(node)) return true; if (visited.has(node)) return false; visiting.add(node); const cycle = (graph.get(node) ?? []).some(visit); visiting.delete(node); visited.add(node); return cycle; };
+  if ([...graph.keys()].some(visit)) errors.push("artifact_dependency_cycle");
+  return result(errors);
+}
+
+export function validateEvidenceEdges({ registry, revisions, targets, evidenceEdges }) {
+  const errors = [...validateRegistryContext(registry).errors]; const revisionMap = byId(revisions); const targetMap = byId(targets); const edgeMap = byId(evidenceEdges); const relations = new Set(asArray(registry?.allowedEvidenceRelations));
+  for (const edge of asArray(evidenceEdges)) {
+    const source = revisionMap.get(edge.sourceRevisionId); const target = targetMap.get(edge.targetId);
+    if (!edge.id || !source || !current(source)) errors.push(`evidence_source_not_current:${edge.id ?? "unknown"}`);
+    if (!target || !current(target)) errors.push(`evidence_target_not_current:${edge.id ?? "unknown"}`);
+    if (!relations.has(edge.relation)) errors.push(`invalid_evidence_relation:${edge.id ?? "unknown"}`);
+    if (edge.evidenceSpan !== source?.text) errors.push(`evidence_span_mismatch:${edge.id ?? "unknown"}`);
+    if (edge.scopeKey !== source?.scopeKey || edge.scopeKey !== target?.scopeKey) errors.push(`evidence_scope_mismatch:${edge.id ?? "unknown"}`);
+    if (edge.classification !== target?.classification) errors.push(`evidence_classification_mismatch:${edge.id ?? "unknown"}`);
+    if ((edge.derivationDepth ?? 0) > 0 && (!edge.parentEdgeId || !edgeMap.has(edge.parentEdgeId))) errors.push(`missing_evidence_parent:${edge.id ?? "unknown"}`);
+    if ((edge.derivationDepth ?? 0) > 1) errors.push(`evidence_derivation_depth_exceeded:${edge.id ?? "unknown"}`);
+  }
+  return result(errors);
+}
+
+const evidenceCurrentFor = (state, evidenceId, targetId, scopeKey) => {
+  const edge = byId(state.evidenceEdges).get(evidenceId); const revision = edge && byId(state.revisions).get(edge.sourceRevisionId); const target = edge && byId(state.targets).get(edge.targetId);
+  return Boolean(edge && current(edge) && current(revision) && current(target) && edge.targetId === targetId && edge.scopeKey === scopeKey);
+};
+export function validateCapabilityCoverageProof({ state, proof }) {
+  const errors = [...validateRegistryContext(state?.registry).errors, ...validateEvidenceEdges({ registry: state?.registry, revisions: state?.revisions, targets: state?.targets, evidenceEdges: state?.evidenceEdges }).errors]; const expectedFingerprint = requirementFingerprint(state);
+  if (proof?.requirementFingerprint !== expectedFingerprint) errors.push("requirement_fingerprint_mismatch");
+  const pattern = asArray(state?.registry?.coreUserValuePatterns).find((item) => item.id === state?.coreUserValue?.patternId);
+  if (!state?.coreUserValue || !pattern || !evidenceCurrentFor(state, state.coreUserValue.evidenceId, state.coreUserValue.targetId, state.coreUserValue.scopeKey)) errors.push("core_user_value_not_grounded_or_mapped");
+  const requiredSlotIds = uniqueSorted([...asArray(pattern?.universalSlotTemplateIds), ...asArray(pattern?.patternSlotTemplateIds)]); const slots = new Map(asArray(proof?.slotEvaluations).map((item) => [item.slotTemplateId, item]));
+  for (const slotId of requiredSlotIds) { const slot = slots.get(slotId); if (!slot || !["satisfied", "explicitly_not_required", "not_applicable"].includes(slot.status)) errors.push(`required_slot_unresolved:${slotId}`); if (slot?.status === "satisfied" && !evidenceCurrentFor(state, slot.evidenceId, slot.targetId, slot.scopeKey)) errors.push(`slot_evidence_not_current:${slotId}`); if (slot?.status !== "satisfied" && !slot?.ruleId) errors.push(`slot_closure_rule_missing:${slotId}`); }
+  return result(errors, { requirementFingerprint: expectedFingerprint, requiredSlotIds });
+}
+
+const requiredSources = (state) => [
+  ...asArray(state?.capabilities).filter((item) => current(item) && item.blocking).map((item) => ({ id: item.id, kind: "capability", scopeKey: item.scopeKey, targetId: item.targetId })),
+  ...asArray(state?.decisionRevisions).filter((item) => current(item) && ["settled", "delegated"].includes(item.status)).map((item) => ({ id: item.id, kind: "decision", scopeKey: item.scopeKey, targetId: item.targetId })),
+  ...asArray(state?.coreInvariants).filter(current).map((item) => ({ id: item.id, kind: "core_invariant", scopeKey: item.scopeKey, targetId: item.targetId })),
+  ...asArray(state?.primaryFlows).filter(current).map((item) => ({ id: item.id, kind: "primary_flow", scopeKey: item.scopeKey, targetId: item.targetId })),
 ];
-export function requirementFingerprint({ authority }) {
-  const state = internal(authority);
-  return hash({ coreUserValue: state.coreUserValue, coreUserValueMapping: state.coreUserValueMapping, slots: [...state.slots.values()].sort((a, b) => a.slotTemplateId.localeCompare(b.slotTemplateId)), sources: currentSources(state).map((item) => ({ id: item.id, kind: item.kind, revisionId: item.revisionId, targetId: item.targetId, evidenceId: item.evidenceId, currentness: item.currentness })).sort((a, b) => a.id.localeCompare(b.id)), registryVersions: state.registries === REGISTRIES ? REGISTRY_VERSION_SET : null });
+export function validateClaimCoverageProof({ state, proof }) {
+  const errors = []; if (proof?.claimSetFingerprint !== claimSetFingerprint(state)) errors.push("claim_set_fingerprint_mismatch"); const claimTypes = new Set(asArray(state?.registry?.claimTypes).map((item) => item.id));
+  for (const source of requiredSources(state)) { const claims = asArray(state.claims).filter((claim) => current(claim) && claim.sourceId === source.id); if (!claims.length) errors.push(`missing_required_claim:${source.id}`); for (const claim of claims) { if (!claimTypes.has(claim.typeId)) errors.push(`unregistered_claim_type:${claim.id}`); if (claim.scopeKey !== source.scopeKey || claim.targetId !== source.targetId) errors.push(`claim_source_scope_mismatch:${claim.id}`); if (!evidenceCurrentFor(state, claim.evidenceId, claim.targetId, claim.scopeKey)) errors.push(`claim_not_grounded:${claim.id}`); } }
+  return result(errors);
 }
-export function claimSetFingerprint({ authority }) {
-  const state = internal(authority); return hash({ requirementFingerprint: requirementFingerprint({ authority }), claims: [...state.claims.values()].filter((item) => item.currentness === "current").map((item) => stable(item)).sort((a, b) => a.id.localeCompare(b.id)), claimTypeVersion: REGISTRY_VERSION_SET.claimType });
+
+export function validateProvisionalCompletionProof({ state, proof }) {
+  const errors = []; const coverage = validateCapabilityCoverageProof({ state, proof: proof?.capabilityCoverageProof }); if (!coverage.eligible) errors.push(...coverage.errors);
+  if (proof?.requirementFingerprint !== requirementFingerprint(state)) errors.push("provisional_requirement_fingerprint_mismatch");
+  if (asArray(state?.decisionRevisions).some((item) => current(item) && item.blocking && !["settled", "delegated"].includes(item.status))) errors.push("unresolved_blocking_decision");
+  if (asArray(state?.issues).some((item) => current(item) && item.blocking && ["conflict", "feasibility"].includes(item.kind))) errors.push("blocking_conflict_or_feasibility_issue");
+  if (state?.graphFixpoint?.reached !== true) errors.push("graph_fixpoint_not_reached"); if (asArray(state?.artifacts).some((item) => item.blocking && item.currentness === "stale")) errors.push("stale_blocking_artifact");
+  return result(errors);
 }
-export function completionCandidateFingerprint({ authority, auditId }) { return hash({ requirementFingerprint: requirementFingerprint({ authority }), claimSetFingerprint: claimSetFingerprint({ authority }), auditId }); }
-export function slotRegistryCoverageProof({ authority }) {
-  const state = internal(authority); const registry = state.registries.slotRegistry;
-  const hasAll = UNIVERSAL_SLOT_TEMPLATES.every((id) => registry.slots.some((slot) => slot.slotTemplateId === id && slot.satisfactionRuleId));
-  const mapped = Boolean(state.coreUserValueMapping?.currentness === "current" && currentEvidence(state, state.coreUserValueMapping.evidenceId));
-  return { registryVersion: registry.registryVersion, semanticRegistryVersion: registry.semanticRegistryVersion, complete: hasAll && mapped && registry.semanticRegistryVersion === REGISTRY_VERSION_SET.coreUserValuePattern };
+
+export function validateAuditProof({ state, auditProof, provisionalProof }) {
+  const errors = []; const executors = new Map(asArray(state?.registry?.auditExecutors).map((item) => [item.id, item])); const executor = executors.get(auditProof?.executorId);
+  if (!executor || executor.version !== auditProof?.executorVersion) errors.push("unregistered_or_version_mismatched_audit_executor");
+  if (auditProof?.outcome !== "passed" || auditProof?.completed !== true || !auditProof?.executionId) errors.push("audit_not_successfully_executed");
+  if (auditProof?.requirementFingerprint !== requirementFingerprint(state)) errors.push("stale_audit_requirement_fingerprint"); if (auditProof?.provisionalProofId !== provisionalProof?.proofId) errors.push("audit_provisional_proof_mismatch"); if (asArray(auditProof?.blockingGapIds).length) errors.push("audit_has_blocking_gaps");
+  return result(errors);
 }
-export function capabilityCoverageProof({ authority }) {
-  const state = internal(authority); const registry = slotRegistryCoverageProof({ authority });
-  const unknownBlockingSlotIds = [...state.slots.values()].filter((slot) => slot.status !== "satisfied" || !currentEvidence(state, slot.evidenceId)).map((slot) => slot.slotTemplateId).sort();
-  const provisionalBlockingCapabilityIds = [...state.capabilities.values()].filter((item) => item.currentness === "current" && item.provisional).map((item) => item.id).sort();
-  return { requirementFingerprint: requirementFingerprint({ authority }), slotRegistryCoverageProofId: hash(registry), unknownBlockingSlotIds, provisionalBlockingCapabilityIds, complete: registry.complete && !unknownBlockingSlotIds.length && !provisionalBlockingCapabilityIds.length };
+
+export function validateSpecClaimConformance({ state, spec }) {
+  const errors = []; const claims = new Set(asArray(state?.claims).filter(current).map((item) => item.id));
+  for (const element of asArray(spec?.elements)) { if (!REQUIRED_SPEC_ELEMENT_KINDS.includes(element.kind)) continue; if (!asArray(element.sourceClaimIds).length) errors.push(`spec_element_missing_claim_ids:${element.id}`); if (asArray(element.sourceClaimIds).some((id) => !claims.has(id))) errors.push(`spec_element_unknown_claim:${element.id}`); }
+  if (!asArray(spec?.elements).length) errors.push("missing_generated_spec_artifact"); return result(errors);
 }
-export function claimCoverageProof({ authority }) {
-  const state = internal(authority); const entries = currentSources(state).map((source) => ({ sourceId: source.id, sourceKind: source.kind, claimIds: [...state.claims.values()].filter((claim) => claim.currentness === "current" && claim.sourceId === source.id && claim.targetId === source.targetId && claim.revisionId === source.revisionId && currentEvidence(state, claim.evidenceId, source.targetId)).map((claim) => claim.id) }));
-  const uncoveredBlockingSourceIds = entries.filter((entry) => !entry.claimIds.length).map((entry) => entry.sourceId);
-  return { claimSetFingerprint: claimSetFingerprint({ authority }), entries, uncoveredBlockingSourceIds, complete: entries.length > 0 && !uncoveredBlockingSourceIds.length };
+
+export function validateFinalCompletionProof({ state, provisionalProof, claimCoverageProof, auditProof, spec, finalProof }) {
+  const errors = []; const provisional = validateProvisionalCompletionProof({ state, proof: provisionalProof }); if (!provisional.eligible) errors.push(...provisional.errors); const claims = validateClaimCoverageProof({ state, proof: claimCoverageProof }); if (!claims.eligible) errors.push(...claims.errors); const audit = validateAuditProof({ state, auditProof, provisionalProof }); if (!audit.eligible) errors.push(...audit.errors); const conformance = validateSpecClaimConformance({ state, spec }); if (!conformance.eligible) errors.push(...conformance.errors);
+  const candidate = completionCandidateFingerprint(state, auditProof?.auditId); if (finalProof?.completionCandidateFingerprint !== candidate) errors.push("completion_candidate_fingerprint_mismatch"); if (finalProof?.provisionalProofId !== provisionalProof?.proofId || finalProof?.auditId !== auditProof?.auditId) errors.push("final_proof_chain_mismatch");
+  return result(errors, { completionCandidateFingerprint: candidate });
 }
-export function provisionalCompletionProof({ authority }) {
-  const state = internal(authority); const coverage = capabilityCoverageProof({ authority });
-  const groundedCoreUserValue = Boolean(state.coreUserValue?.currentness === "current" && currentEvidence(state, state.coreUserValue.evidenceId, state.coreUserValue.targetId));
-  const staleBlockingArtifactIds = [...state.artifacts.values()].filter((item) => item.currentness === "stale" && item.blocking).map((item) => item.id).sort();
-  const allDecisionsSettled = [...state.decisions.values()].filter((item) => item.currentness === "current").every((item) => currentEvidence(state, item.evidenceId, item.targetId));
-  const graphFixpointReached = coverage.complete && allDecisionsSettled;
-  const complete = groundedCoreUserValue && coverage.complete && allDecisionsSettled && graphFixpointReached && !staleBlockingArtifactIds.length;
-  return deepFreeze({ requirementFingerprint: requirementFingerprint({ authority }), proofId: hash({ requirementFingerprint: requirementFingerprint({ authority }), groundedCoreUserValue, coverage: coverage.complete, allDecisionsSettled, graphFixpointReached, staleBlockingArtifactIds }), groundedCoreUserValue, capabilityCoverageComplete: coverage.complete, allDecisionsSettled, blockingConflictIds: [], blockingFeasibilityIssueIds: [], graphFixpointReached, staleBlockingArtifactIds, complete });
+
+export const migrationRecordId = (record) => `migration:${hash({ sourceContextVersion: record.sourceContextVersion, targetContextVersion: record.targetContextVersion, sourceFactFingerprint: record.sourceFactFingerprint, registryVersionSet: record.registryVersionSet })}`;
+export function validateMigrationRecord({ record, registry, existingRecords = [], currentProjection }) {
+  const errors = [...validateRegistryContext(registry).errors]; for (const field of ["migrationId", "sourceContextVersion", "targetContextVersion", "sourceFactFingerprint", "registryVersionSet", "migrationStatus", "migrationWarnings"]) if (record?.[field] === undefined || record?.[field] === null) errors.push(`migration_missing_field:${field}`);
+  if (record?.migrationId && record.migrationId !== migrationRecordId(record)) errors.push("migration_identity_mismatch"); if (!registryVersionsMatch(record?.registryVersionSet)) errors.push("migration_registry_version_mismatch"); const duplicate = asArray(existingRecords).filter((item) => item.sourceFactFingerprint === record?.sourceFactFingerprint && item.targetContextVersion === record?.targetContextVersion && item.migrationId !== record?.migrationId); if (duplicate.length) errors.push("migration_idempotency_violation"); if (currentProjection && currentProjection.migrationId !== record?.migrationId) errors.push("migration_current_projection_mismatch"); return result(errors);
 }
-const internalSpecElements = (state) => currentSources(state).map((source, index) => ({ id: `spec:${index}:${source.id}`, kind: index % 2 ? "acceptance_criteria" : "functional_requirement", sourceClaimIds: [`claim:${source.id}`] }));
-export function requestAuditExecution({ authority, auditId }) {
-  const state = internal(authority); if (!auditId) throw new Error("invalid audit request");
-  const provisional = provisionalCompletionProof({ authority }); const claims = claimCoverageProof({ authority }); const fp = requirementFingerprint({ authority });
-  const passed = provisional.complete && claims.complete;
-  state.audits.set(auditId, { auditId, executorId: state.registries.auditExecutor.id, executorVersion: state.registries.auditExecutor.version, auditRuleId: state.registries.auditRule.id, requirementFingerprint: fp, outcome: passed ? "passed" : "failed", completed: true, rejectedGapFingerprints: passed ? [] : [hash({ provisional, claims })] });
-  return { accepted: true, auditId, passed };
+
+/** In-memory transaction/DAG kernel. It transports only already-validated facts. */
+export function createTransactionKernel({ revisions = [], dependencies = [] } = {}) { const kernel = freeze({ kind: "v5-pr0-transaction-kernel" }); KERNEL.set(kernel, { version: 0, revisions: [...revisions], dependencies: [...dependencies] }); return kernel; }
+const kernelState = (kernel) => { const state = KERNEL.get(kernel); if (!state) throw new Error("invalid transaction kernel"); return state; };
+export function beginTransaction(kernel) { const state = kernelState(kernel); return { kernel, baseVersion: state.version, revisions: [...state.revisions], dependencies: [...state.dependencies], closed: false }; }
+export function proposeRevision(transaction, revision) { if (transaction.closed) throw new Error("transaction is closed"); transaction.revisions.push({ ...revision }); }
+export function proposeDependency(transaction, dependency) { if (transaction.closed) throw new Error("transaction is closed"); transaction.dependencies.push({ ...dependency }); }
+export function rollbackTransaction(transaction) { transaction.closed = true; return freeze({ committed: false, rolledBack: true }); }
+export function commitTransaction(transaction) {
+  if (transaction.closed) throw new Error("transaction is closed"); const state = kernelState(transaction.kernel); if (state.version !== transaction.baseVersion) { transaction.closed = true; return freeze({ committed: false, rolledBack: true, errors: ["optimistic_concurrency_conflict"] }); }
+  const validation = validateRevisionInvariants({ revisions: transaction.revisions, dependencies: transaction.dependencies }); if (!validation.eligible) { transaction.closed = true; return freeze({ committed: false, rolledBack: true, errors: validation.errors }); }
+  const changedHeads = new Set(transaction.revisions.filter(current).map((item) => item.instanceId)); const stale = new Set(); const visit = (id) => transaction.dependencies.filter((edge) => edge.fromId === id).forEach((edge) => { if (!stale.has(edge.toId)) { stale.add(edge.toId); visit(edge.toId); } }); for (const id of changedHeads) visit(id);
+  state.revisions = transaction.revisions.map((revision) => stale.has(revision.id) ? { ...revision, currentness: "stale" } : revision); state.dependencies = transaction.dependencies; state.version += 1; transaction.closed = true; return freeze({ committed: true, version: state.version, staleArtifactIds: uniqueSorted([...stale]) });
 }
-export function auditTerminalState({ authority, auditId }) {
-  const state = internal(authority); const audit = state.audits.get(auditId); const fp = requirementFingerprint({ authority });
-  if (!audit || audit.requirementFingerprint !== fp) return { state: "stale", rejectedGapFingerprints: audit?.rejectedGapFingerprints ?? [] };
-  return { state: audit.completed && audit.outcome === "passed" ? "passed" : "failed_terminal", rejectedGapFingerprints: audit.rejectedGapFingerprints };
-}
-export function validateSpecClaimConformance({ authority }) {
-  const state = internal(authority); const elements = internalSpecElements(state); const claimIds = new Set([...state.claims.values()].filter((claim) => claim.currentness === "current" && currentEvidence(state, claim.evidenceId, claim.targetId)).map((claim) => claim.id));
-  const invalidElementIds = elements.filter((element) => element.sourceClaimIds.some((id) => !claimIds.has(id))).map((element) => element.id);
-  return { invalidElementIds, complete: elements.length > 0 && !invalidElementIds.length };
-}
-export function finalCompletionProof({ authority, auditId }) {
-  internal(authority); const provisional = provisionalCompletionProof({ authority }); const claims = claimCoverageProof({ authority }); const audit = auditTerminalState({ authority, auditId }); const spec = validateSpecClaimConformance({ authority }); const requirementFp = requirementFingerprint({ authority });
-  const complete = provisional.complete && claims.complete && audit.state === "passed" && spec.complete;
-  return deepFreeze({ requirementFingerprint: requirementFp, completionCandidateFingerprint: completionCandidateFingerprint({ authority, auditId }), provisionalCompletionProofId: provisional.proofId, capabilityCoverageComplete: provisional.capabilityCoverageComplete, claimCoverageComplete: claims.complete, auditState: audit.state, specClaimConformanceComplete: spec.complete, complete });
-}
-export function requestMigration({ authority, request }) {
-  const state = internal(authority);
-  if (!request || typeof request.sourceId !== "string" || !request.sourceId) throw new Error("invalid migration request");
-  // PR0 deliberately has no v4 source connector. A request is recorded but no
-  // authority projection is created until an internal authenticated adapter exists.
-  state.migrationRequests.set(request.sourceId, { sourceId: request.sourceId, status: "unavailable_without_internal_adapter" });
-  return { accepted: false, reason: "no_internal_authenticated_legacy_source" };
-}
-export function currentMigrationProjection({ authority, sourceFactFingerprint }) { internal(authority); void sourceFactFingerprint; return null; }
+export function transactionSnapshot(kernel) { const state = kernelState(kernel); return freeze({ version: state.version, revisions: state.revisions.map((item) => ({ ...item })), dependencies: state.dependencies.map((item) => ({ ...item })) }); }
