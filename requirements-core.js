@@ -18,7 +18,7 @@ const uniqueByKey = (items) => [...new Map(items.map((item) => [item.key ?? item
 export function createProjectContext(idea) {
   const value = idea.trim();
   return {
-    sessionId: newSessionId(), idea: value, analysis: null,
+    sessionId: newSessionId(), idea: value, analysis: null, coreCapabilities: [],
     facts: [{ key: "idea", value, source: SOURCE.INITIAL }], dimensions: [], answers: {}, answeredQuestionKeys: [], answeredDecisionDomains: [], inferredDecisionDomains: [],
     inferredDecisions: {}, implementationProposals: [], futureOptional: [], history: [], coreInvariants: [],
     confirmedFinalDecisions: [], finalConfirmationHistory: [],
@@ -53,6 +53,7 @@ export function criticalDecisionCoverageFingerprint(context) {
     answeredDecisionDomains: [...(context?.answeredDecisionDomains ?? [])].sort(),
     inferredDecisionDomains: [...(context?.inferredDecisionDomains ?? [])].sort(),
     confirmedFinalDecisions: (context?.confirmedFinalDecisions ?? []).map((item) => ({ id: item.id, decisionDomain: item.decisionDomain, fingerprint: item.fingerprint })).sort((a, b) => a.id.localeCompare(b.id)),
+    coreCapabilities: (context?.coreCapabilities ?? []).map((item) => ({ id: item.id, resolution: item.resolution, relatedDecisionDomains: item.relatedDecisionDomains ?? [] })).sort((a, b) => a.id.localeCompare(b.id)),
   });
 }
 
@@ -60,7 +61,7 @@ export function applyAnalysis(context, analysis) {
   const facts = uniqueByKey([...context.facts, ...(analysis.knownFacts ?? []).map((fact) => ({
     key: fact.key, value: fact.value, source: SOURCE.INITIAL, reason: fact.reason ?? "入力内容から確認できる事実",
   }))]);
-  const analyzed = { ...context, analysis, facts };
+  const analyzed = { ...context, analysis, facts, coreCapabilities: admitCoreCapabilities({ ...context, facts }, analysis?.coreCapabilities ?? []) };
   const next = { ...analyzed, coreInvariants: deriveCoreInvariants(analyzed), status: "questioning" };
   return { ...next, completionGate: completionGate(next) };
 }
@@ -404,6 +405,36 @@ export function criticalDecisionRequiresQuestion(item, context = null) {
     && necessity.derivableFromConfirmedDecision === false;
 }
 
+function safelyInferredCoreCapability(capability) {
+  const safe = capability?.safeInference;
+  return capability?.resolution === "safely_inferable"
+    && safe?.directDerivation === true
+    && safe?.derivationDepth <= 1
+    && safe?.introducesNewProductValue === false
+    && safe?.hasMultipleReasonableProductBehaviors === false;
+}
+
+function admitCoreCapabilities(context, capabilities) {
+  return (capabilities ?? []).filter((capability) => {
+    if (!capability?.id || !(capability.requiredForCoreUserValue || capability.requiredForPrimaryFlow)) return false;
+    return evaluateRequirementGrounding(context, capability, { phase: "initial" }).accepted;
+  }).map((capability) => ({ ...capability, relatedDecisionDomains: [...new Set(capability.relatedDecisionDomains ?? [])] }));
+}
+
+function unresolvedCoreCapabilityDecisions(context) {
+  const settled = new Set([...(context?.answeredDecisionDomains ?? []), ...(context?.inferredDecisionDomains ?? [])].map((domain) => canonicalDecisionDomain(domain, domain)));
+  return (context?.coreCapabilities ?? []).flatMap((capability) => {
+    if (capability.resolution === "resolved_by_input" || safelyInferredCoreCapability(capability)) return [];
+    if (capability.requiresUserDecision !== true || capability.materiallyChangesProduct !== true) return [];
+    const domains = capability.relatedDecisionDomains?.length ? capability.relatedDecisionDomains : [`core_capability_${capability.id}`];
+    return domains.filter((domain) => !settled.has(canonicalDecisionDomain(domain, domain))).map((decisionDomain) => ({
+      decisionDomain: canonicalDecisionDomain(decisionDomain, decisionDomain),
+      reason: `${capability.description}を実現するための利用者向けの方針が未確定です。`,
+      capabilityId: capability.id,
+    }));
+  });
+}
+
 /**
  * The analysis describes what is already certain; it must not silently turn
  * an ambiguous generic "management" idea into a CRUD or completion flow.
@@ -483,11 +514,12 @@ export function completionGate(context) {
   const reservationFlow = invariantDomains(context).has("reservation_exclusivity");
   const directProductDomains = dimensions.map((dimension) => canonicalDecisionDomain(dimension.question, dimension.id));
   const analysisDecisions = analysisCriticalProductDecisions(context);
+  const capabilityDecisions = unresolvedCoreCapabilityDecisions(context);
   const flowCoverage = primaryFlowCompleteness(context);
-  const hasDirectProductDecision = directProductDomains.length > 0 || analysisDecisions.length > 0;
+  const hasDirectProductDecision = directProductDomains.length > 0 || analysisDecisions.length > 0 || capabilityDecisions.length > 0;
   const fallbackDomain = reservationFlow ? "reservation_primary_flow" : "primary_flow_definition";
   const criticalDecisionDomains = hasDirectProductDecision
-    ? [...new Set([...directProductDomains, ...analysisDecisions.map((item) => item.decisionDomain)])]
+    ? [...new Set([...directProductDomains, ...analysisDecisions.map((item) => item.decisionDomain), ...capabilityDecisions.map((item) => item.decisionDomain)])]
     : context?.analysis && flowCoverage.primaryAction.resolved ? [] : [fallbackDomain];
   const knownDecisionDomains = [...criticalDecisionDomains, ...(context?.answeredDecisionDomains ?? []), ...(context?.inferredDecisionDomains ?? [])];
   if (coreOutputEligibilityNeedsDecision(context, knownDecisionDomains)) criticalDecisionDomains.push("core_output_eligibility");
@@ -507,11 +539,12 @@ export function completionGate(context) {
     .filter((domain) => !resolvedDomains.has(domain))
     .map((decisionDomain) => {
       const analysisReason = analysisDecisions.find((item) => item.decisionDomain === decisionDomain)?.reason;
+      const capabilityReason = capabilityDecisions.find((item) => item.decisionDomain === decisionDomain)?.reason;
       return {
         decisionDomain,
         reason: decisionDomain === "actor_scope" ? "主な利用者が未定義です。"
           : decisionDomain === "managed_object_definition" ? "主に管理・操作する対象が未定義です。"
-            : analysisReason ?? (reservationFlow ? "予約する対象と確定までの主要フローが未定義です。" : "主要な利用者操作が未定義です。"),
+            : capabilityReason ?? analysisReason ?? (reservationFlow ? "予約する対象と確定までの主要フローが未定義です。" : "主要な利用者操作が未定義です。"),
       };
     });
   const coverageAuditRequired = context?.criticalDecisionCoverageAuditRequired === true;
@@ -534,6 +567,7 @@ export function completionGate(context) {
     unresolvedCriticalProductDecisions,
     primaryFlowCoverage: flowCoverage,
     coreInvariants: context?.coreInvariants?.length ? context.coreInvariants : deriveCoreInvariants(context),
+    coreCapabilities: context?.coreCapabilities ?? [],
     coverageAuditRequired,
     coverageAuditCurrent,
     coverageAuditPending: coverageAuditRequired && !coverageAuditCurrent && unresolvedCriticalProductDecisions.length === 0 && !hasUnresolvedStateTransitionGaps(context),
@@ -1026,6 +1060,13 @@ export function applyCriticalDecisionCoverageAudit(context, audit) {
   console.log("stateTransitionGaps", (audit?.stateTransitionGaps ?? []).map((x) => ({ id: x.id ?? null, decisionDomain: x.question?.decisionDomain ?? null, requiresProductDecision: x.requiresProductDecision ?? null })));
   console.log("answeredDecisionDomains", context?.answeredDecisionDomains ?? []);
   console.groupEnd();
+  const auditedCapabilities = admitCoreCapabilities(context, audit?.coreCapabilities ?? []);
+  if (auditedCapabilities.length) {
+    context = {
+      ...context,
+      coreCapabilities: uniqueByKey([...(context.coreCapabilities ?? []), ...auditedCapabilities]),
+    };
+  }
   const auditCandidates = [...(audit?.criticalProductDecisions ?? []), ...(audit?.clarificationQuestions ?? []), ...(audit?.stateTransitionGaps ?? []).filter((gap) => gap.requiresProductDecision)];
   const auditAdmission = admitGroundedCandidates(context, auditCandidates, "after_answer");
   const auditDomains = auditAdmission.accepted.map((item) => canonicalDecisionDomain(item?.decisionDomain ?? item?.question?.decisionDomain ?? item?.id, item?.id ?? ""));
@@ -1063,6 +1104,7 @@ export function applyCriticalDecisionCoverageAudit(context, audit) {
       summary: audit?.coverageSummary ?? "",
       auditedDecisionDomains: audit?.auditedDecisionDomains ?? [],
       discoveredDecisionDomains: criticalProductDecisions.map((item) => canonicalDecisionDomain(item.decisionDomain, item.decisionDomain)),
+      auditedCoreCapabilities: (context.coreCapabilities ?? []).map((item) => ({ id: item.id, resolution: item.resolution })),
       nonBlockingDecisionDomains: rejectedNonCriticalDecisions.map((item) => canonicalDecisionDomain(item.decisionDomain, item.decisionDomain)),
     },
   };
@@ -1400,6 +1442,10 @@ export function buildCanonicalRequirements(context) {
     version: "v4.1",
     idea: context.idea,
     coreUserValue: { value: context.analysis?.purpose ?? context.idea, origin: SOURCE.INITIAL },
+    coreCapabilities: (context.coreCapabilities ?? []).map((item) => ({
+      id: item.id, value: item.description, resolution: item.resolution,
+      relatedDecisionDomains: item.relatedDecisionDomains ?? [], origin: SOURCE.INITIAL,
+    })),
     coreInvariants: model.coreInvariants.map((item) => ({ id: item.id, decisionDomain: item.decisionDomain, value: item.value, origin: item.origin })),
     primaryFlowInputs,
     userConfirmedDecisions: model.userConfirmed.map((item) => ({ key: item.key, value: item.value, origin: SOURCE.USER })),
@@ -1712,6 +1758,10 @@ export function validateSpecConsistency(context, spec) {
   issues.push(...reservationInvariantMissing(context, spec));
   const ungroundedConcept = ungroundedProductConceptInSpec(context, spec);
   if (ungroundedConcept) issues.push({ ruleId: "ungrounded_product_concept", ruleName: "根拠のない新しいプロダクト概念", section: "SPEC expansion", severity: "error", message: `根拠のない新しいプロダクト概念「${ungroundedConcept}」がMVP必須仕様に含まれています。`, suggestedFix: "Canonical Requirementsに根拠がない概念は削除し、必要ならProduct DecisionまたはImplementation Proposalとして扱ってください。" });
+  const groundingText = JSON.stringify(buildCanonicalRequirements(context)).toUpperCase();
+  const unexplainedTechnicalNotation = [...new Set(mandatoryText.match(/\b[A-Z][A-Z0-9]{1,12}\b/g) ?? [])]
+    .find((token) => !["MVP", "AI", "UI", "UX", "FR", "IR", "AC"].includes(token) && !/^(?:FR|IR|AC)\d+$/i.test(token) && !groundingText.includes(token));
+  if (unexplainedTechnicalNotation) issues.push({ ruleId: "ungrounded_technical_notation", ruleName: "根拠のない技術表記", section: "SPEC expansion", severity: "error", message: `根拠のない技術表記「${unexplainedTechnicalNotation}」が必須仕様に含まれています。`, suggestedFix: "Canonical Requirementsに根拠がない表記は削除するか、技術的な候補としてImplementation Proposalへ移してください。" });
   const explicitlyRequired = /(必須|必ず|必要です|must|required)/i.test(mvpText);
   const leakedFuture = model.futureOptional.find((item) => item.value && mvpText.includes(String(item.value)));
   if (explicitlyRequired && leakedFuture) issues.push({ section: "MVP Scope", severity: "error", message: "Future / Optionalの項目がMVP必須要件として扱われています。", suggestedFix: "将来項目をMVP ScopeとAcceptance Criteriaから外してください。" });
