@@ -1,3 +1,4 @@
+// DIAGNOSTIC BUILD ONLY — restore from .\requirements-core.js.before-diag after tracing
 
 /**
  * Domain layer for 仕様太郎 v4.1.
@@ -518,6 +519,14 @@ export function completionGate(context) {
     context?.criticalDecisionCoverageAudit?.fingerprint === criticalDecisionCoverageFingerprint(context)
     && context?.criticalDecisionCoverageAudit?.complete === true
   );
+    console.group("[DIAG] completionGate");
+  console.log("criticalDecisionDomains", criticalDecisionDomains);
+  console.log("resolvedDomains", [...resolvedDomains]);
+  console.log("resolvedCriticalDecisionDomains", resolvedCriticalDecisionDomains);
+  console.log("unresolvedCriticalProductDecisions", unresolvedCriticalProductDecisions.map((x) => ({ decisionDomain: x.decisionDomain, reason: x.reason })));
+  console.log("primaryFlowCoverage", flowCoverage);
+  console.log("answeredDecisionDomains", context?.answeredDecisionDomains ?? []);
+  console.groupEnd();
   return {
     complete: unresolvedCriticalProductDecisions.length === 0 && !hasUnresolvedStateTransitionGaps(context) && coverageAuditCurrent,
     criticalDecisionDomains,
@@ -531,7 +540,28 @@ export function completionGate(context) {
   };
 }
 
+function genericDecisionQuestionText(missing) {
+  const domain = String(missing?.decisionDomain ?? "").trim();
+  const reason = String(missing?.reason ?? "").trim();
+  const meaningfulDomain = domain
+    .replace(/^(?:core_value|primary_flow|mvp_feature|business_rule|roles_permissions)\s*[:/_-]\s*/i, "")
+    .replace(/[_:]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const subject = meaningfulDomain || reason.replace(/[。.!?！？]+$/u, "") || "未確定のプロダクト判断";
+  return {
+    label: subject,
+    title: `${subject}について、どの方針にしますか？`,
+    intent: reason || `${subject}を実装可能な形で確定します。`,
+  };
+}
+
 function completionQuestion(context, missing) {
+  console.group("[DIAG] completionQuestion input");
+  console.log("missing", { decisionDomain: missing?.decisionDomain ?? null, reason: missing?.reason ?? null });
+  console.log("answeredDecisionDomains", context?.answeredDecisionDomains ?? []);
+  console.log("all dimensions before generation", (context?.dimensions ?? []).map((d) => ({ id: d.id, decisionDomain: d.question?.decisionDomain ?? null, known: d.known, value: d.value })));
+  console.groupEnd();
   const reservationFlow = invariantDomains(context).has("reservation_exclusivity");
   const domain = String(missing.decisionDomain ?? "");
   const asksCustomerInformationTiming = /(?:customer|contact|identity|information|profile).*(?:reservation|booking|creation)?|(?:reservation|booking).*(?:customer|contact|identity|information|profile)/i.test(domain);
@@ -595,23 +625,22 @@ function completionQuestion(context, missing) {
       },
     };
   }
-  const options = reservationFlow
-    ? ["予約対象と日時を選んで確定する", "予約対象・利用内容・日時を選んで確定する", "その他・自由回答"]
-    : ["対象を登録・更新して一覧で管理する", "対象の利用状況を記録して管理する", "その他・自由回答"];
+  const generic = genericDecisionQuestionText(missing);
+  const options = ["推奨される最小方針で進める", "別の方針を指定する", "その他・自由回答"];
   return {
     id: missing.decisionDomain,
-    label: reservationFlow ? "予約の中心フロー" : "中心となる利用フロー",
+    label: generic.label,
     importance: "high",
     userJudgmentRequired: true,
     known: false,
     value: null,
     questionDepth: 0,
     question: {
-      title: reservationFlow ? "利用者は何を選んで予約を確定しますか？" : "利用者は、対象をどのように管理しますか？",
-      intent: missing.reason,
+      title: generic.title,
+      intent: generic.intent,
       options,
       recommended: options[0],
-      recommendationReason: "主要フローを実装可能な形で確定するためです。",
+      recommendationReason: "未確定のプロダクト判断を、元の意味を保ったまま具体化するためです。",
       decisionDomain: missing.decisionDomain,
       decisionBoundary: "primary_flow",
       informationGain: "high",
@@ -624,6 +653,12 @@ function completionQuestion(context, missing) {
 /** Supplies one generic, flow-derived question only when the provider has no valid product candidate. */
 function addCompletionQuestion(context) {
   const gate = completionGate(context);
+  console.group("[DIAG] addCompletionQuestion gate");
+  console.log("gate.complete", gate.complete);
+  console.log("gate.coverageAuditPending", gate.coverageAuditPending);
+  console.log("unresolved", (gate.unresolvedCriticalProductDecisions ?? []).map((x) => ({ decisionDomain: x.decisionDomain, reason: x.reason })));
+  console.log("all dimensions entering addCompletionQuestion", (context.dimensions ?? []).map((d) => ({ id: d.id, decisionDomain: d.question?.decisionDomain ?? null, known: d.known, value: d.value })));
+  console.groupEnd();
   if (gate.complete || planNext(context)) return { ...context, completionGate: gate };
   // Coverage is an independent AI review, not a synthetic Product Decision.
   // The UI invokes it before review; only decisions found by that audit are
@@ -632,11 +667,25 @@ function addCompletionQuestion(context) {
   const missing = gate.unresolvedCriticalProductDecisions[0];
   if (!missing) return { ...context, completionGate: gate };
   const fallback = completionQuestion(context, missing);
+  console.group("[DIAG] completionQuestion generated");
+  console.log({
+    missingDecisionDomain: missing?.decisionDomain ?? null,
+    generatedId: fallback?.id ?? null,
+    generatedQuestionDomain: fallback?.question?.decisionDomain ?? null,
+    generatedTitle: fallback?.question?.title ?? null,
+    generatedOptions: fallback?.question?.options ?? [],
+  });
+  console.groupEnd();
   const hasInvalidCandidate = (context.dimensions ?? []).some((dimension) => canonicalDecisionDomain(dimension.question, dimension.id) === missing.decisionDomain);
   const dimensions = hasInvalidCandidate
     ? context.dimensions.map((dimension) => canonicalDecisionDomain(dimension.question, dimension.id) === missing.decisionDomain ? fallback : dimension)
     : [...(context.dimensions ?? []), fallback];
   const next = { ...context, dimensions };
+  console.group("[DIAG] merged clarification dimensions");
+  console.log("hasInvalidCandidate", hasInvalidCandidate);
+  console.log("missingDecisionDomain", missing?.decisionDomain ?? null);
+  console.log("dimensions after merge", dimensions.map((d) => ({ id: d.id, decisionDomain: d.question?.decisionDomain ?? null, known: d.known, value: d.value, title: d.question?.title ?? null })));
+  console.groupEnd();
   return { ...next, completionGate: completionGate(next) };
 }
 
@@ -699,13 +748,32 @@ export function monotonicDisplayProgress(previousDisplayProgress, calculatedProg
 export function planNext(context, detailMode = false) {
   const weight = { high: 3, medium: 2, low: 1 };
   const settledDomains = new Set([...(context.answeredDecisionDomains ?? []), ...(context.inferredDecisionDomains ?? []), ...invariantDomains(context)].map((domain) => canonicalDecisionDomain(domain, domain)));
-  return context.dimensions
+  const selected = context.dimensions
     .filter((d) => !d.known && d.value == null && d.question && !(context.answeredQuestionKeys ?? []).includes(d.id) && !settledDomains.has(canonicalDecisionDomain(d.question, d.id)) && questionIsAllowed(d.question, d.questionDepth ?? 0, context) && (detailMode || d.userJudgmentRequired))
     .sort((a, b) => {
       const aNeed = a.question?.necessity; const bNeed = b.question?.necessity;
       const score = (need) => Number(need?.clarifiesUserRequest) * 3 + Number(need?.requiredForCoreValue) * 2 + Number(need?.requiredForPrimaryFlow);
       return score(bNeed) - score(aNeed) || weight[b.importance] - weight[a.importance];
     })[0] ?? null;
+  console.group("[DIAG] planNext");
+  console.log("all dimensions", (context.dimensions ?? []).map((d) => ({
+    id: d.id,
+    decisionDomain: d.question?.decisionDomain ?? null,
+    canonicalDomain: canonicalDecisionDomain(d.question, d.id),
+    title: d.question?.title ?? null,
+    known: d.known,
+    value: d.value,
+    answeredQuestion: (context.answeredQuestionKeys ?? []).includes(d.id),
+    settledExact: settledDomains.has(canonicalDecisionDomain(d.question, d.id)),
+    settledSemantic: isDecisionDomainSettled(context, canonicalDecisionDomain(d.question, d.id)),
+    questionAllowed: d.question ? questionIsAllowed(d.question, d.questionDepth ?? 0, context) : false,
+    userJudgmentRequired: d.userJudgmentRequired,
+  })));
+  console.log("candidate dimensions", (context.dimensions ?? []).filter((d) => !d.known && d.value == null && d.question).map((d) => ({ id: d.id, decisionDomain: d.question?.decisionDomain ?? null, canonicalDomain: canonicalDecisionDomain(d.question, d.id), title: d.question?.title ?? null, answeredQuestion: (context.answeredQuestionKeys ?? []).includes(d.id), settledExact: settledDomains.has(canonicalDecisionDomain(d.question, d.id)), settledSemantic: isDecisionDomainSettled(context, canonicalDecisionDomain(d.question, d.id)) })));
+  console.log("answeredDecisionDomains", context.answeredDecisionDomains ?? []);
+  console.log("selected", selected ? { id: selected.id, decisionDomain: selected.question?.decisionDomain ?? null, canonicalDomain: canonicalDecisionDomain(selected.question, selected.id), title: selected.question?.title ?? null } : null);
+  console.groupEnd();
+  return selected;
 }
 
 export function recordAnswer(context, dimensionId, value, usedRecommendation = false) {
@@ -724,6 +792,13 @@ export function recordAnswer(context, dimensionId, value, usedRecommendation = f
     answeredDecisionDomains: [...new Set([...(context.answeredDecisionDomains ?? []), canonicalDecisionDomain(dimension.question, dimensionId)])],
     history: [...context.history, { dimensionId, value, questionDepth: dimension.questionDepth ?? 0, source: SOURCE.USER, at: new Date().toISOString() }],
   };
+    console.group("[DIAG] recordAnswer");
+  console.log("dimension.id", dimension.id);
+  console.log("question.decisionDomain", dimension.question?.decisionDomain ?? null);
+  console.log("canonical answered domain", canonicalDecisionDomain(dimension.question, dimensionId));
+  console.log("answeredDecisionDomains", next.answeredDecisionDomains);
+  console.log("user confirmed facts", next.facts.filter((f) => f.source === SOURCE.USER).map((f) => ({ key: f.key, decisionDomain: f.decisionDomain ?? null, value: f.value })));
+  console.groupEnd();
   return { ...next, completionGate: completionGate(next) };
 }
 
@@ -843,6 +918,12 @@ function mayBecomeMandatoryInferred(context, item) {
 export function recordInference(context, inference) {
   const withInvariants = { ...context, coreInvariants: deriveCoreInvariants(context) };
   let grouped = normaliseInference(inference);
+  console.group("[DIAG] inferMvp");
+  console.log("criticalProductDecisions", (grouped.criticalProductDecisions ?? []).map((x) => ({ decisionDomain: x.decisionDomain ?? null, reason: x.reason ?? null })));
+  console.log("clarificationQuestions", (grouped.clarificationQuestions ?? []).map((x) => ({ id: x.id ?? null, decisionDomain: x.question?.decisionDomain ?? null, title: x.question?.title ?? null })));
+  console.log("stateTransitionGaps", (grouped.stateTransitionGaps ?? []).map((x) => ({ id: x.id ?? null, decisionDomain: x.question?.decisionDomain ?? null, requiresProductDecision: x.requiresProductDecision ?? null })));
+  console.log("answeredDecisionDomains", withInvariants.answeredDecisionDomains ?? []);
+  console.groupEnd();
   const decisionCandidates = [...(grouped.criticalProductDecisions ?? []), ...(grouped.clarificationQuestions ?? []), ...(grouped.stateTransitionGaps ?? []).filter((gap) => gap.requiresProductDecision)];
   const admitted = admitGroundedCandidates(withInvariants, decisionCandidates, "after_answer");
   const admittedDomains = admitted.accepted.map((item) => canonicalDecisionDomain(item?.decisionDomain ?? item?.question?.decisionDomain ?? item?.id, item?.id ?? ""));
@@ -927,12 +1008,24 @@ export function recordInference(context, inference) {
       }))),
     dimensions: [...dimensions, ...clarificationDimensions, ...stateGapDimensions],
   };
+    console.group("[DIAG] reassessed");
+  console.log("reassessedCriticalProductDecisions", (next.reassessedCriticalProductDecisions ?? []).map((x) => ({ decisionDomain: x.decisionDomain ?? null, reason: x.reason ?? null })));
+  console.log("dimensions", (next.dimensions ?? []).map((d) => ({ id: d.id, decisionDomain: d.question?.decisionDomain ?? null, title: d.question?.title ?? null, known: d.known, value: d.value })));
+  console.log("answeredDecisionDomains", next.answeredDecisionDomains ?? []);
+  console.groupEnd();
   return addCompletionQuestion(next);
 }
 
 /** Applies one independent coverage audit. Missing product decisions flow
  * through the same inference/question guards as ordinary reassessment. */
 export function applyCriticalDecisionCoverageAudit(context, audit) {
+
+  console.group("[DIAG] coverage-audit");
+  console.log("criticalProductDecisions", (audit?.criticalProductDecisions ?? []).map((x) => ({ decisionDomain: x.decisionDomain ?? null, reason: x.reason ?? null })));
+  console.log("clarificationQuestions", (audit?.clarificationQuestions ?? []).map((x) => ({ id: x.id ?? null, decisionDomain: x.question?.decisionDomain ?? null, title: x.question?.title ?? null })));
+  console.log("stateTransitionGaps", (audit?.stateTransitionGaps ?? []).map((x) => ({ id: x.id ?? null, decisionDomain: x.question?.decisionDomain ?? null, requiresProductDecision: x.requiresProductDecision ?? null })));
+  console.log("answeredDecisionDomains", context?.answeredDecisionDomains ?? []);
+  console.groupEnd();
   const auditCandidates = [...(audit?.criticalProductDecisions ?? []), ...(audit?.clarificationQuestions ?? []), ...(audit?.stateTransitionGaps ?? []).filter((gap) => gap.requiresProductDecision)];
   const auditAdmission = admitGroundedCandidates(context, auditCandidates, "after_answer");
   const auditDomains = auditAdmission.accepted.map((item) => canonicalDecisionDomain(item?.decisionDomain ?? item?.question?.decisionDomain ?? item?.id, item?.id ?? ""));

@@ -1126,6 +1126,45 @@ test("coverage audit accepts safe unique inference but becomes stale after a new
   assert.equal(completionGate(context).coverageAuditPending, true);
 });
 
+test("unknown completion domain fallback preserves the original decision meaning", () => {
+  const decisionDomain = "レシピマッチ基準（完全一致か部分一致/代替許容か）";
+  const reason = "手持ち食材との一致条件によって、今日作れるレシピの範囲が変わります。";
+  let context = applyAnalysis(createProjectContext("冷蔵庫の食材から今日作れるレシピを提案する"), {
+    projectType: "レシピ提案", platform: null, genre: null,
+    purpose: "今日作れる料理の選択を助ける。", targetUsers: "自宅の利用者", managedObject: "食材とレシピ",
+    primaryAction: "食材を登録してレシピ候補を確認する", persistedOutcome: null,
+    successCondition: "条件に合うレシピを選べる", knownFacts: [], uncertainties: [reason],
+    criticalProductDecisions: [{ decisionDomain, reason, resolvedByInitialInput: false }],
+  });
+  context = ensureCompletionQuestion(context);
+  const next = planNext(context);
+  assert.equal(next?.id, decisionDomain);
+  assert.equal(next?.question?.decisionDomain, decisionDomain);
+  assert.match(next?.question?.title ?? "", /レシピマッチ基準/);
+  assert.equal(next?.question?.intent, reason);
+  assert.doesNotMatch(next?.question?.title ?? "", /利用者は、対象をどのように管理しますか/);
+});
+
+test("unknown completion fallback is domain-generic and does not collapse unrelated decisions into management", () => {
+  for (const scenario of [
+    { domain: "candidate_substitution_policy", reason: "不足条件を代替候補で補えるかによって提示結果が変わります。" },
+    { domain: "ingredient_quantity_policy", reason: "食材の有無だけか数量まで判定するかが未確定です。" },
+  ]) {
+    let context = applyAnalysis(createProjectContext("入力から候補を提案するアプリ"), {
+      projectType: "提案", platform: null, genre: null, purpose: "候補を提案する。", targetUsers: "利用者",
+      managedObject: "入力と候補", primaryAction: "入力して候補を確認する", persistedOutcome: null,
+      successCondition: "候補を選べる", knownFacts: [], uncertainties: [scenario.reason],
+      criticalProductDecisions: [{ decisionDomain: scenario.domain, reason: scenario.reason, resolvedByInitialInput: false }],
+    });
+    context = ensureCompletionQuestion(context);
+    const next = planNext(context);
+    assert.equal(next?.question?.decisionDomain, scenario.domain);
+    assert.match(next?.question?.title ?? "", new RegExp(scenario.domain.replace(/_/g, " ").split(" ")[0], "i"));
+    assert.equal(next?.question?.intent, scenario.reason);
+    assert.doesNotMatch(next?.question?.title ?? "", /対象をどのように管理/);
+  }
+});
+
 test("AI analysis cannot invent a local-only boundary and a leaking proposal is removed from repair input", () => {
   const sharingQuestion = {
     title: "家族でどう共有しますか？", intent: "共有体験を決めます。", options: ["複数端末で同じ一覧を共有する", "一台だけで使う"], recommended: "複数端末で同じ一覧を共有する", recommendationReason: "家族で使いやすいためです。",
