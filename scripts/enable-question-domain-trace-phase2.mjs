@@ -11,13 +11,48 @@ if (source.includes("[DIAG] completionQuestion input")) {
   process.exit(0);
 }
 
-function insertAfterLiteral(label, needle, code) {
-  const count = source.split(needle).length - 1;
-  if (count !== 1) throw new Error(`[${label}] expected exactly 1 match, found ${count}`);
-  source = source.replace(needle, `${needle}\n${code}`);
+function functionRange(name) {
+  const markers = [`function ${name}(`, `export function ${name}(`];
+  let start = -1;
+  for (const marker of markers) {
+    const candidate = source.indexOf(marker);
+    if (candidate >= 0 && (start < 0 || candidate < start)) start = candidate;
+  }
+  if (start < 0) throw new Error(`Function not found: ${name}`);
+  const brace = source.indexOf("{", start);
+  let depth = 0;
+  let quote = null;
+  let escaped = false;
+  for (let i = brace; i < source.length; i += 1) {
+    const ch = source[i];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") { quote = ch; continue; }
+    if (ch === "{") depth += 1;
+    if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return { start, end: i + 1 };
+    }
+  }
+  throw new Error(`Could not find function end: ${name}`);
 }
 
-insertAfterLiteral(
+function insertAfterInFunction(name, label, needle, code) {
+  const { start, end } = functionRange(name);
+  const block = source.slice(start, end);
+  const count = block.split(needle).length - 1;
+  if (count !== 1) throw new Error(`[${label}] expected exactly 1 match in ${name}, found ${count}`);
+  const local = block.indexOf(needle) + needle.length;
+  const pos = start + local;
+  source = source.slice(0, pos) + "\n" + code + source.slice(pos);
+}
+
+insertAfterInFunction(
+  "completionQuestion",
   "completionQuestion input",
   "function completionQuestion(context, missing) {",
   `  console.group("[DIAG] completionQuestion input");
@@ -27,7 +62,8 @@ insertAfterLiteral(
   console.groupEnd();`
 );
 
-insertAfterLiteral(
+insertAfterInFunction(
+  "addCompletionQuestion",
   "addCompletionQuestion gate",
   "  const gate = completionGate(context);",
   `  console.group("[DIAG] addCompletionQuestion gate");
@@ -38,7 +74,8 @@ insertAfterLiteral(
   console.groupEnd();`
 );
 
-insertAfterLiteral(
+insertAfterInFunction(
+  "addCompletionQuestion",
   "completionQuestion generated",
   "  const fallback = completionQuestion(context, missing);",
   `  console.group("[DIAG] completionQuestion generated");
@@ -52,7 +89,8 @@ insertAfterLiteral(
   console.groupEnd();`
 );
 
-insertAfterLiteral(
+insertAfterInFunction(
+  "addCompletionQuestion",
   "merged clarification dimensions",
   "  const next = { ...context, dimensions };",
   `  console.group("[DIAG] merged clarification dimensions");
@@ -62,7 +100,8 @@ insertAfterLiteral(
   console.groupEnd();`
 );
 
-insertAfterLiteral(
+insertAfterInFunction(
+  "planNext",
   "planNext all dimensions",
   "  console.group(\"[DIAG] planNext\");",
   `  console.log("all dimensions", (context.dimensions ?? []).map((d) => ({
