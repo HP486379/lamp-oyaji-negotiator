@@ -8,6 +8,8 @@ const RELATIONS = Object.freeze({ explicitly_states: Object.freeze({ sourceType:
 const AUTH = new WeakMap(); const KERNEL = new WeakMap();
 const stable = (v) => Array.isArray(v) ? v.map(stable) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, stable(v[k])])) : v;
 const hash = (v) => createHash("sha256").update(JSON.stringify(stable(v))).digest("hex");
+const snapshot = (v) => deepFreeze(JSON.parse(JSON.stringify(v)));
+const deepFreeze = (v) => { if (!v || typeof v !== "object" || Object.isFrozen(v)) return v; Object.freeze(v); Object.values(v).forEach(deepFreeze); return v; };
 const arr = (v) => Array.isArray(v) ? v : [];
 const map = (v) => new Map(arr(v).map((x) => [x.id, x]));
 const current = (v) => v?.currentness === "current";
@@ -33,7 +35,7 @@ export const productionCompletionStatus = ({ authority }) => { stateOf(authority
 export const provisionalCompletionProof = productionCompletionStatus; export const finalCompletionProof = productionCompletionStatus; export const requestAuditExecution = productionCompletionStatus; export const auditTerminalState = productionCompletionStatus; export const requestMigration = productionCompletionStatus; export const currentMigrationProjection = ({ authority }) => { stateOf(authority); return null; };
 
 /** Test-only/synthetic Authority fixture: Registry, Ledger and candidate Proof stay separate. */
-export function createVerifierAuthority({ registry, ledger }) { const a = Object.freeze({ kind: "v5-pr0-verifier-authority" }); AUTH.set(a, { registry: Object.freeze(registry), ledger: Object.freeze(ledger), production: false }); return a; }
+export function createVerifierAuthority({ registry, ledger }) { const a = Object.freeze({ kind: "v5-pr0-verifier-authority" }); AUTH.set(a, Object.freeze({ registry: snapshot(registry), ledger: snapshot(ledger), production: false })); return a; }
 const facts = (authority) => { const s = stateOf(authority); if (s.production) return null; return s; };
 export function requirementFingerprint(authority) { const { registry, ledger } = facts(authority) ?? {}; return hash({ coreUserValue: ledger?.coreUserValue ? { revisionId: ledger.coreUserValue.revisionId, value: ledger.coreUserValue.value, patternId: ledger.coreUserValue.patternId } : null, actors: arr(ledger?.actors).filter(current), managedObjects: arr(ledger?.managedObjects).filter(current), capabilities: arr(ledger?.capabilities).filter(current).map(({ id, key, scopeKey, evidenceId }) => ({ id, key, scopeKey, evidenceId })), traits: arr(ledger?.traits).filter(current), decisions: arr(ledger?.decisionRevisions).filter(current).map(({ id, instanceId, value, scopeKey }) => ({ id, instanceId, value, scopeKey })), blockingIssues: arr(ledger?.issues).filter((x) => current(x) && x.blocking), registryVersions: registry?.versionSet ?? null }); }
 export function claimSetFingerprint(authority) { const { ledger } = facts(authority) ?? {}; return hash({ requirementFingerprint: requirementFingerprint(authority), claims: arr(ledger?.claims).filter(current).map(({ id, sourceId, typeId, evidenceId, scopeKey }) => ({ id, sourceId, typeId, evidenceId, scopeKey })), claimTypeVersion: facts(authority)?.registry?.versionSet?.claimType ?? null }); }
